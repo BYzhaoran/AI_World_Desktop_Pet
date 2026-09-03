@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type MouseEvent } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { emit, listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { ChevronRight, Cog, Download, Heart, History, Package, RefreshCw, Sparkles, X } from 'lucide-react';
+import { ChevronRight, Cog, Download, Heart, History, MapPin, Package, RefreshCw, Sparkles, X } from 'lucide-react';
 import { initialState } from './simulation';
 import { animationsForGrid, AnimationController, type AnimationState } from './sprite/AnimationController';
 import { frameFor } from './sprite/SpriteSheet';
@@ -19,6 +19,21 @@ type SettingsState = {
   realTime: boolean;
   characterDescription: string;
   characterExperiences: string;
+  characterTags: string;
+  characterInterests: string;
+  characterBehavior: string;
+  characterStartLocation: string;
+  characterItems: string;
+  characterSkills: string;
+  characterAvatarFrame: number;
+  characterEnergy?: number;
+  characterMood?: number;
+  characterHealth?: number;
+  characterIntelligence?: number;
+  characterFriendship?: number;
+  characterCuriosity?: number;
+  characterCreativity?: number;
+  characterCourage?: number;
   spriteColumns: number;
   spriteRows: number;
   spriteData: string;
@@ -29,7 +44,7 @@ type SettingsState = {
 };
 type LogEntry = { time: string; level: 'info' | 'error'; message: string };
 type ResizeDirection = 'East' | 'North' | 'NorthEast' | 'NorthWest' | 'South' | 'SouthEast' | 'SouthWest' | 'West';
-type SettingsTab = 'provider' | 'character' | 'sprite' | 'runtime';
+type SettingsTab = 'provider' | 'character' | 'sprite' | 'runtime' | 'reset';
 
 function appendLog(level: LogEntry['level'], message: string) {
   const entry = { time: new Date().toISOString(), level, message };
@@ -88,7 +103,7 @@ function PetStage({
 
   return (
     <section className="pet-stage">
-      <div className="pet-drag-zone" data-tauri-drag-region onMouseDown={drag}>
+      <div className="pet-drag-zone" data-tauri-drag-region onMouseDownCapture={event => { event.preventDefault(); drag(); }} onMouseDown={drag}>
         <button className={`sprite-pet ${spriteUrl ? 'has-sprite' : ''}`} onMouseDown={event => { event.preventDefault(); event.stopPropagation(); }} onClick={event => { event.currentTarget.blur(); onClick(); }} aria-label={`打开 ${state.name} 窗口`}>
           {spriteUrl ? <span className="sprite-frame" style={style} /> : <><div className="pet-shadow" /><div className="pet-hair" /><div className="pet-face"><i /><i /><b /></div><div className="pet-body" /><div className="pet-dress" /></>}
         </button>
@@ -126,6 +141,42 @@ function InventoryView({ state }: { state: PetState }) {
   return <section className="detail-view"><div className="section-title"><div><span className="eyebrow">COLLECTED OBJECTS</span><h3>物品</h3></div></div><div className="detail-list">{state.inventory.map(item => <article className="detail-row" key={item.name}><div className="item-icon"><Package size={16} /></div><div><strong>{item.name}</strong><span>{item.detail}</span></div></article>)}</div></section>;
 }
 
+function CharacterView({ state, settings, onChange, spriteUrl, atlasSize, onFrameChange }: { state: PetState; settings: SettingsState; onChange: (next: SettingsState) => void; spriteUrl: string; atlasSize: { width: number; height: number }; onFrameChange: (frame: number) => void }) {
+  const [editing, setEditing] = useState(false);
+  const update = (patch: Partial<SettingsState>) => onChange({ ...settings, ...patch });
+  const split = (value: string) => value.split(/[,\n，、]/).map(item => item.trim()).filter(Boolean);
+  const rect = spriteUrl ? frameFor({ width: atlasSize.width, height: atlasSize.height, columns: settings.spriteColumns, rows: settings.spriteRows }, settings.characterAvatarFrame) : undefined;
+  const avatarStyle = rect ? { width: rect.width, height: rect.height, backgroundImage: `url(${spriteUrl})`, backgroundSize: `${atlasSize.width}px ${atlasSize.height}px`, backgroundPosition: `-${rect.x}px -${rect.y}px` } : undefined;
+  const stats = [['能量', settings.characterEnergy ?? state.energy], ['心情', settings.characterMood ?? state.mood], ['体力', settings.characterHealth ?? state.health], ['智力', settings.characterIntelligence ?? state.intelligence], ['好奇心', settings.characterCuriosity ?? state.curiosity], ['社交', settings.characterFriendship ?? state.friendship]];
+  return <section className="detail-view character-view">
+    <div className="section-title"><div><span className="eyebrow">CHARACTER PROFILE</span><h3>人物</h3></div><button className="outline-action" onClick={() => setEditing(value => !value)}>{editing ? '完成' : '编辑'}</button></div>
+    <div className="character-hero"><div className="character-avatar" style={avatarStyle}>{!avatarStyle && settings.characterName.slice(0, 1)}</div><div><h4>{settings.characterName || state.name}</h4><p>{settings.characterDescription || '还没有角色简介。'}</p><div className="tag-list">{split(settings.characterTags).map(tag => <span key={tag}>{tag}</span>)}</div></div></div>
+    {!editing ? <><div className="profile-grid">{stats.map(([label, value]) => <div className="profile-stat" key={String(label)}><span>{label}</span><b>{value}</b><Progress value={Number(value)} /></div>)}</div><div className="profile-sections"><div><strong>兴趣与喜好</strong><p>{settings.characterInterests || '未设置'}</p></div><div><strong>行为倾向</strong><p>{settings.characterBehavior || '未设置'}</p></div><div><strong>初始地点</strong><p>{settings.characterStartLocation || state.location}</p></div><div><strong>背景故事</strong><p>{settings.characterExperiences || '未设置'}</p></div><div><strong>初始物品</strong><p>{split(settings.characterItems).join('、') || '无'}</p></div><div><strong>初始技能</strong><p>{split(settings.characterSkills).join('、') || '无'}</p></div></div></> : <div className="character-editor">
+      <label>角色名称<input value={settings.characterName} onChange={event => update({ characterName: event.target.value })} /></label>
+      <label>性格标签<input value={settings.characterTags} onChange={event => update({ characterTags: event.target.value })} placeholder="好奇, 温柔, 害羞" /></label>
+      <label>兴趣与喜好<textarea value={settings.characterInterests} onChange={event => update({ characterInterests: event.target.value })} /></label>
+      <label>行为倾向<textarea value={settings.characterBehavior} onChange={event => update({ characterBehavior: event.target.value })} /></label>
+      <label>初始地点<input value={settings.characterStartLocation} onChange={event => update({ characterStartLocation: event.target.value })} /></label>
+      <div className="settings-grid">{[['characterEnergy', '能量'], ['characterMood', '心情'], ['characterHealth', '体力'], ['characterIntelligence', '智力'], ['characterCuriosity', '好奇心'], ['characterFriendship', '社交'], ['characterCreativity', '创造力'], ['characterCourage', '勇气']].map(([key, label]) => <label key={key}>{label}<input type="number" min="0" max="100" value={settings[key as keyof SettingsState] as number} onChange={event => update({ [key]: Number(event.target.value) } as Partial<SettingsState>)} /></label>)}</div>
+      <label>背景故事 / 角色简介<textarea value={settings.characterExperiences} onChange={event => update({ characterExperiences: event.target.value })} /></label>
+      <label>初始物品<input value={settings.characterItems} onChange={event => update({ characterItems: event.target.value })} placeholder="笔记本, 雨伞" /></label>
+      <label>初始技能<input value={settings.characterSkills} onChange={event => update({ characterSkills: event.target.value })} placeholder="阅读, 绘画" /></label>
+      <label>头像帧<input type="number" min="0" max={settings.spriteColumns * settings.spriteRows - 1} value={settings.characterAvatarFrame} onChange={event => { const frame = Math.max(0, Number(event.target.value)); update({ characterAvatarFrame: frame }); onFrameChange(frame); }} /></label>
+    </div>}
+    <div className="profile-dimensions"><strong>五维成长属性</strong><div className="profile-grid">{[['智力', settings.characterIntelligence ?? state.intelligence], ['好奇心', settings.characterCuriosity ?? state.curiosity], ['社交', settings.characterFriendship ?? state.friendship], ['创造力', settings.characterCreativity ?? state.creativity], ['勇气', settings.characterCourage ?? state.courage]].map(([label, value]) => <div className="profile-stat" key={String(label)}><span>{label}</span><b>{value}</b><Progress value={Number(value)} /></div>)}</div></div>
+  </section>;
+}
+
+function MapView({ state }: { state: PetState }) {
+  const locations = state.knownLocations.length ? state.knownLocations : [{ name: state.location, description: '', exploration: 0, rarity: 'common' }];
+  const eventLocations = new Set(state.events.slice(0, 8).map(event => event.location).filter(Boolean));
+  return <section className="detail-view map-view">
+    <div className="section-title"><div><span className="eyebrow">WORLD LOCATIONS</span><h3>地图</h3></div><span className="map-current"><MapPin size={13} /> 当前：{state.location}</span></div>
+    <div className="location-list">{locations.map(location => <article className={`location-row ${location.name === state.location ? 'current' : ''}`} key={location.name}><div className="location-icon"><MapPin size={16} /></div><div><strong>{location.name}</strong><span>{location.description || '尚无场景描述'}</span><small>探索度 {location.exploration}% · {location.rarity}</small></div>{location.name === state.location && <b>当前所在</b>}{eventLocations.has(location.name) && <em>事件发生地</em>}</article>)}</div>
+    <div className="map-event-note"><strong>最近事件场景</strong>{state.events.slice(0, 5).map(event => <p key={event.id}><span>{event.timestamp}</span>{event.location || '未知地点'}：{event.summary}</p>)}</div>
+  </section>;
+}
+
 function SettingsPanel({ settings, onChange, onClose, onTest, onExport, onReset, onSprite, onLogs }: {
   settings: SettingsState;
   onChange: (next: SettingsState) => void;
@@ -143,7 +194,7 @@ function SettingsPanel({ settings, onChange, onClose, onTest, onExport, onReset,
       <section className="settings-panel" onMouseDown={event => event.stopPropagation()}>
         <header><div><span className="eyebrow">WORLD CONFIGURATION</span><h2>Settings</h2></div><button className="icon-button" onClick={onClose}><X size={18} /></button></header>
         <nav className="settings-tabs">
-          {([['provider', 'API / Model'], ['character', 'Character'], ['sprite', 'Sprite / Animation'], ['runtime', 'Runtime']] as const).map(([key, label]) => <button key={key} className={tab === key ? 'active' : ''} onClick={() => setTab(key)}>{label}</button>)}
+          {([['provider', 'API / Model'], ['character', 'Character'], ['sprite', 'Sprite / Animation'], ['runtime', 'Runtime'], ['reset', 'Reset']] as const).map(([key, label]) => <button key={key} className={tab === key ? 'active' : ''} onClick={() => setTab(key)}>{label}</button>)}
         </nav>
         {tab === 'provider' && <>
           <label>Base URL<input value={settings.baseUrl} onChange={event => update({ baseUrl: event.target.value })} placeholder="https://example.com/v1" /></label>
@@ -171,8 +222,8 @@ function SettingsPanel({ settings, onChange, onClose, onTest, onExport, onReset,
           <label className="check-row"><input type="checkbox" checked={settings.realTime} onChange={event => update({ realTime: event.target.checked })} /> Real-time mode</label>
           <div className="settings-actions settings-page-actions"><button className="outline-action" onClick={onLogs}>OPEN LOGS</button><button className="outline-action" onClick={onExport}><Download size={14} /> EXPORT</button></div>
         </>}
+        {tab === 'reset' && <div className="reset-page"><h3>Reset Character World</h3><p>Restore the initial character, five starting locations, one friend, one backpack and an empty event history. API, model and key settings remain unchanged.</p><button className="primary-action reset-button" onClick={onReset}><RefreshCw size={14} /> RESET CHARACTER WORLD</button></div>}
         <div className="settings-actions">
-          <button className="text-action" onClick={onReset}>RESET WORLD</button>
           <button className="primary-action" onClick={onClose}>SAVE</button>
         </div>
       </section>
@@ -188,7 +239,7 @@ function LogsPanel({ close }: { close: () => void }) {
 
 export default function App() {
   const [state, setState] = useState<PetState>(() => { try { return JSON.parse(localStorage.getItem('aoi-world-state') || 'null') || initialState; } catch { return initialState; } });
-  const [settings, setSettings] = useState<SettingsState>(() => { try { return { baseUrl: '', model: '', language: 'zh', characterName: initialState.name, sidebarEvents: 8, fps: 8, realTime: true, apiKey: '', characterDescription: '', characterExperiences: '', spriteColumns: 8, spriteRows: 9, spriteData: '', spriteAtlasWidth: 768, spriteAtlasHeight: 936, spriteFrameWidth: 96, spriteFrameHeight: 104, ...JSON.parse(localStorage.getItem('aoi-world-settings') || '{}') }; } catch { return { baseUrl: '', model: '', apiKey: '', language: 'zh', characterName: initialState.name, sidebarEvents: 8, fps: 8, realTime: true, characterDescription: '', characterExperiences: '', spriteColumns: 8, spriteRows: 9, spriteData: '', spriteAtlasWidth: 768, spriteAtlasHeight: 936, spriteFrameWidth: 96, spriteFrameHeight: 104 }; } });
+  const [settings, setSettings] = useState<SettingsState>(() => { try { return { baseUrl: '', model: '', language: 'zh', characterName: initialState.name, sidebarEvents: 8, fps: 8, realTime: true, apiKey: '', characterDescription: '', characterExperiences: '', characterTags: '好奇, 温柔', characterInterests: '', characterBehavior: '', characterStartLocation: initialState.location, characterItems: '', characterSkills: '', characterAvatarFrame: 0, characterHealth: 100, characterIntelligence: 50, characterFriendship: 0, characterCuriosity: 50, spriteColumns: 8, spriteRows: 9, spriteData: '', spriteAtlasWidth: 768, spriteAtlasHeight: 936, spriteFrameWidth: 96, spriteFrameHeight: 104, ...JSON.parse(localStorage.getItem('aoi-world-settings') || '{}') }; } catch { return { baseUrl: '', model: '', apiKey: '', language: 'zh', characterName: initialState.name, sidebarEvents: 8, fps: 8, realTime: true, characterDescription: '', characterExperiences: '', characterTags: '好奇, 温柔', characterInterests: '', characterBehavior: '', characterStartLocation: initialState.location, characterItems: '', characterSkills: '', characterAvatarFrame: 0, characterHealth: 100, characterIntelligence: 50, characterFriendship: 0, characterCuriosity: 50, spriteColumns: 8, spriteRows: 9, spriteData: '', spriteAtlasWidth: 768, spriteAtlasHeight: 936, spriteFrameWidth: 96, spriteFrameHeight: 104 }; } });
   const [running, setRunning] = useState(true);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [logsOpen, setLogsOpen] = useState(false);
@@ -197,7 +248,7 @@ export default function App() {
   const [spriteFrame, setSpriteFrame] = useState(0);
   const animationRef = useRef(new AnimationController(animationsForGrid(settings.spriteColumns, settings.spriteRows)));
   const generatingRef = useRef(false);
-  const [chronicleView, setChronicleView] = useState<'事件' | '人际' | '性格' | '物品' | '设置'>('事件');
+  const [chronicleView, setChronicleView] = useState<'事件' | '人际' | '人物' | '地图' | '物品' | '设置'>('事件');
   const windowLabel = getCurrentWindow().label;
   const isChronicleWindow = windowLabel === 'chronicle';
 
@@ -278,7 +329,7 @@ export default function App() {
         model: settings.model,
         apiKey: settings.apiKey || null,
         language: settings.language,
-        characterContext: `Name: ${settings.characterName}\nPersonality: ${settings.characterDescription}\nExperiences: ${settings.characterExperiences}`,
+        characterContext: `Name: ${settings.characterName}\nTags: ${settings.characterTags}\nInterests: ${settings.characterInterests}\nBehavior: ${settings.characterBehavior}\nStart location: ${settings.characterStartLocation}\nStats: energy=${settings.characterEnergy ?? state.energy}, mood=${settings.characterMood ?? state.mood}, health=${settings.characterHealth ?? state.health}, intelligence=${settings.characterIntelligence ?? state.intelligence}, curiosity=${settings.characterCuriosity ?? state.curiosity}, social=${settings.characterFriendship ?? state.friendship}, creativity=${settings.characterCreativity ?? state.creativity}, courage=${settings.characterCourage ?? state.courage}\nInitial items: ${settings.characterItems}\nInitial skills: ${settings.characterSkills}\nPersonality: ${settings.characterDescription}\nExperiences: ${settings.characterExperiences}`,
       }));
       notify('AI event generated');
     } catch (error) {
@@ -297,10 +348,40 @@ export default function App() {
   }, [isChronicleWindow, running, settings.baseUrl, settings.model, settings.apiKey, settings.language, settings.characterDescription, settings.characterExperiences]);
 
   const resetWorld = async () => {
-    if (!window.confirm('This will delete all character progress, memories, relationships and event history. Continue?')) return;
-    try { await invoke('reset_world'); } catch {}
-    localStorage.removeItem('aoi-world-state');
-    location.reload();
+    if (!window.confirm('Reset the character world? API, model and key settings will be kept.')) return;
+    try {
+      await invoke('reset_world');
+      const snapshot = await invoke<WorldSnapshot>('get_world');
+      setState(snapshot);
+      setSpriteUrl('');
+      setSpriteFrame(0);
+      setSettings(current => ({
+        ...current,
+        characterName: 'Aoi',
+        characterDescription: '',
+        characterExperiences: '',
+        characterTags: '好奇, 温柔',
+        characterInterests: '',
+        characterBehavior: '',
+        characterStartLocation: '家',
+        characterItems: '书包',
+        characterSkills: '',
+        characterAvatarFrame: 0,
+        characterEnergy: 100,
+        characterMood: 100,
+        characterHealth: 100,
+        characterIntelligence: 10,
+        characterFriendship: 10,
+        characterCuriosity: 10,
+        characterCreativity: 10,
+        characterCourage: 10,
+        spriteData: '',
+      }));
+      notify('Character world reset');
+    } catch (error) {
+      appendLog('error', `reset failed: ${String(error)}`);
+      notify('Reset failed');
+    }
   };
 
   const exportWorld = () => {
@@ -350,8 +431,10 @@ export default function App() {
     ? <Chronicle state={state} onAiGenerate={generateAiEvent} />
     : chronicleView === '人际'
       ? <RelationshipsView state={state} />
-      : chronicleView === '性格'
-        ? <PersonalityView state={state} />
+      : chronicleView === '人物'
+        ? <CharacterView state={state} settings={settings} onChange={setSettings} spriteUrl={spriteUrl} atlasSize={{ width: settings.spriteAtlasWidth, height: settings.spriteAtlasHeight }} onFrameChange={setSpriteFrame} />
+        : chronicleView === '地图'
+          ? <MapView state={state} />
         : chronicleView === '物品'
           ? <InventoryView state={state} />
           : <SettingsPanel settings={settings} onChange={setSettings} onClose={() => setChronicleView('事件')} onTest={testProvider} onExport={exportWorld} onReset={resetWorld} onSprite={importSprite} onLogs={() => setLogsOpen(true)} />;
@@ -361,7 +444,7 @@ export default function App() {
       <div className="chronicle-window" data-tauri-drag-region onMouseDown={handleWindowDrag}>
         <div className="chronicle-shell">
           <nav className="chronicle-nav">
-            {([['事件', History], ['人际', Heart], ['性格', Sparkles], ['物品', Package], ['设置', Cog]] as const).map(([label, Icon]) => <button className={chronicleView === label ? 'active' : ''} onClick={() => setChronicleView(label)} title={label} key={label}><Icon size={16} /><span>{label}</span></button>)}
+            {([['事件', History], ['人际', Heart], ['人物', Sparkles], ['地图', MapPin], ['物品', Package], ['设置', Cog]] as const).map(([label, Icon]) => <button className={chronicleView === label ? 'active' : ''} onClick={() => setChronicleView(label)} title={label} key={label}><Icon size={16} /><span>{label}</span></button>)}
           </nav>
           <main className="chronicle-content">{chronicleContent}</main>
         </div>

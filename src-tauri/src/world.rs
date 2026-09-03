@@ -1,4 +1,4 @@
-use chrono::{DateTime, Local};
+use chrono::{DateTime, Datelike, Local, Timelike};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::{fs, path::PathBuf};
@@ -24,6 +24,13 @@ pub struct EventEffects {
     #[serde(alias = "happiness")]
     pub mood: i32,
     pub xp: i32,
+    pub health: i32,
+    pub intelligence: i32,
+    pub friendship: i32,
+    pub curiosity: i32,
+    pub creativity: i32,
+    pub courage: i32,
+    pub money: i32,
     pub relationship: Option<RelationshipEffect>,
     pub personality_signal: Option<PersonalitySignal>,
     pub item: Option<ItemEffect>,
@@ -82,13 +89,17 @@ pub struct EventRecord {
 #[serde(rename_all = "camelCase")]
 pub struct WorldSnapshot {
     pub name: String, pub level: i32, pub xp: i32, pub next_xp: i32,
-    pub mood: i32, pub energy: i32, pub location: String, pub weather: String,
+    pub mood: i32, pub energy: i32, pub health: i32, pub intelligence: i32,
+    pub friendship: i32, pub curiosity: i32, pub creativity: i32, pub courage: i32, pub money: i32,
+    pub location: String, pub weather: String,
     pub status: String, pub animation: String,
     pub traits: Vec<Trait>, pub skills: Vec<Skill>, pub inventory: Vec<InventoryItem>,
-    pub goals: Vec<Goal>, pub npcs: Vec<Npc>, pub events: Vec<EventRecord>,
+    pub goals: Vec<Goal>, pub npcs: Vec<Npc>, pub known_locations: Vec<Location>,
+    pub events: Vec<EventRecord>,
     pub world_time: String, pub last_update: String, pub important_today: i32,
     pub next_normal_check: Option<i64>, pub memory_context: String,
     pub memories: Vec<String>, pub personality_evidence: Vec<PersonalityEvidence>,
+    pub day_count: i32, pub total_play_time: i64, pub current_behavior: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -100,7 +111,14 @@ pub struct InventoryItem { pub name: String, pub detail: String, pub icon: Strin
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Goal { pub name: String, pub progress: i32, pub target: i32 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Npc { pub id: String, pub name: String, pub role: String, pub relationship: i32, pub stage: String, pub avatar: String }
+pub struct Npc {
+    pub id: String, pub name: String, pub role: String, pub relationship: i32,
+    pub stage: String, pub avatar: String, pub personality: String,
+    pub favorite_item: String, pub home_location: String,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Location { pub name: String, pub description: String, pub exploration: i32, pub rarity: String }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PersonalityEvidence { pub trait_name: String, pub delta: i32, pub event_id: String, pub reason: String }
@@ -123,6 +141,11 @@ impl Engine {
     fn migrate(&self) -> rusqlite::Result<()> {
         self.db.execute_batch("CREATE TABLE IF NOT EXISTS world_state (key TEXT PRIMARY KEY,value TEXT NOT NULL); CREATE TABLE IF NOT EXISTS characters (id TEXT PRIMARY KEY,name TEXT NOT NULL,level INTEGER NOT NULL,xp INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS personality_traits (name TEXT PRIMARY KEY,score INTEGER NOT NULL,color TEXT NOT NULL); CREATE TABLE IF NOT EXISTS events (id TEXT PRIMARY KEY,timestamp TEXT NOT NULL,type TEXT NOT NULL,summary TEXT NOT NULL,importance REAL NOT NULL,location TEXT NOT NULL,causes TEXT NOT NULL,participants TEXT NOT NULL DEFAULT '[]'); CREATE TABLE IF NOT EXISTS personality_evidence (id INTEGER PRIMARY KEY,trait TEXT NOT NULL,delta INTEGER NOT NULL,event_id TEXT NOT NULL,reason TEXT NOT NULL); CREATE TABLE IF NOT EXISTS relationships (npc_id TEXT PRIMARY KEY,score INTEGER NOT NULL,stage TEXT NOT NULL); CREATE TABLE IF NOT EXISTS shared_experiences (id INTEGER PRIMARY KEY,event_ids TEXT NOT NULL,summary TEXT NOT NULL); CREATE TABLE IF NOT EXISTS memories (id TEXT PRIMARY KEY,event_id TEXT NOT NULL,summary TEXT NOT NULL,created_at TEXT NOT NULL); CREATE TABLE IF NOT EXISTS npcs (id TEXT PRIMARY KEY,name TEXT NOT NULL,role TEXT NOT NULL,avatar TEXT NOT NULL); CREATE TABLE IF NOT EXISTS important_people (id TEXT PRIMARY KEY,content TEXT NOT NULL); CREATE TABLE IF NOT EXISTS inventory (id TEXT PRIMARY KEY,name TEXT NOT NULL,quantity INTEGER NOT NULL,description TEXT NOT NULL DEFAULT ''); CREATE TABLE IF NOT EXISTS skills (id TEXT PRIMARY KEY,name TEXT NOT NULL,level INTEGER NOT NULL,experience INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS goals (id TEXT PRIMARY KEY,description TEXT NOT NULL,progress INTEGER NOT NULL,target INTEGER NOT NULL,completed INTEGER NOT NULL);")?;
         let _ = self.db.execute("ALTER TABLE events ADD COLUMN participants TEXT NOT NULL DEFAULT '[]'", []);
+        let _ = self.db.execute("ALTER TABLE npcs ADD COLUMN personality TEXT NOT NULL DEFAULT ''", []);
+        let _ = self.db.execute("ALTER TABLE npcs ADD COLUMN favorite_item TEXT NOT NULL DEFAULT ''", []);
+        let _ = self.db.execute("ALTER TABLE npcs ADD COLUMN home_location TEXT NOT NULL DEFAULT ''", []);
+        self.db.execute("DELETE FROM relationships WHERE npc_id IN ('aoi','yuki','ren')", [])?;
+        self.db.execute("DELETE FROM npcs WHERE id IN ('aoi','yuki','ren')", [])?;
         Ok(())
     }
 
@@ -134,12 +157,10 @@ impl Engine {
         }
         let traits = [("好奇",78,"#f0a44b"),("善良",82,"#d66b62"),("自信",42,"#5c9a9b"),("专注",66,"#7582b6")];
         for (name, score, color) in traits { tx.execute("INSERT INTO personality_traits VALUES (?1,?2,?3)", params![name,score,color])?; }
-        let npcs = [("aoi","Aoi","同学 · 朋友","A"),("yuki","Yuki","邻居 · 熟人","Y"),("ren","Ren","图书管理员","R")];
-        for (id,name,role,avatar) in npcs { tx.execute("INSERT INTO npcs VALUES (?1,?2,?3,?4)", params![id,name,role,avatar])?; }
-        for (id, score, stage) in [("aoi",42,"friend"),("yuki",18,"acquaintance"),("ren",9,"acquaintance")] { tx.execute("INSERT INTO relationships VALUES (?1,?2,?3)", params![id,score,stage])?; }
         tx.execute("INSERT INTO world_state(key,value) VALUES ('skills',?1)", params![r#"[{"name":"阅读","level":4,"xp":72},{"name":"绘画","level":2,"xp":38},{"name":"专注","level":3,"xp":61}]"#])?;
         tx.execute("INSERT INTO world_state(key,value) VALUES ('inventory',?1)", params![r#"[{"name":"旧书签","detail":"Aoi 送的纪念品","icon":"bookmark"},{"name":"雨伞","detail":"透明的蓝色雨伞","icon":"umbrella"},{"name":"笔记本","detail":"记录着她的想法","icon":"notebook"}]"#])?;
         tx.execute("INSERT INTO world_state(key,value) VALUES ('goals',?1)", params![r#"[{"name":"读完 5 本书","progress":3,"target":5},{"name":"学会画画","progress":42,"target":100},{"name":"成为更好的朋友","progress":68,"target":100}]"#])?;
+        tx.execute("INSERT OR REPLACE INTO world_state(key,value) VALUES ('known_locations',?1)", params![r#"[{"name":"Home","description":"A quiet place to rest.","exploration":35,"rarity":"common"}]"#])?;
         tx.commit()?;
         Ok(())
     }
@@ -154,7 +175,7 @@ impl Engine {
         let events = self.events()?;
         let important_today = events.iter().filter(|e| e.event_type == "important_event" && e.timestamp.starts_with(&now.format("%Y-%m-%d").to_string())).count() as i32;
         let traits = { let mut stmt=self.db.prepare("SELECT name,score,color FROM personality_traits ORDER BY rowid")?; let rows=stmt.query_map([], |r| Ok(Trait{name:r.get(0)?,score:r.get(1)?,color:r.get(2)?}))?; rows.collect::<Result<Vec<_>,_>>()? };
-        let npcs = { let mut stmt=self.db.prepare("SELECT n.id,n.name,n.role,COALESCE(r.score,0),COALESCE(r.stage,'acquaintance'),n.avatar FROM npcs n LEFT JOIN relationships r ON r.npc_id=n.id ORDER BY n.rowid")?; let rows=stmt.query_map([], |r| Ok(Npc{id:r.get(0)?,name:r.get(1)?,role:r.get(2)?,relationship:r.get(3)?,stage:r.get(4)?,avatar:r.get(5)?}))?; rows.collect::<Result<Vec<_>,_>>()? };
+        let npcs = { let mut stmt=self.db.prepare("SELECT n.id,n.name,n.role,COALESCE(r.score,0),COALESCE(r.stage,'acquaintance'),n.avatar,n.personality,n.favorite_item,n.home_location FROM npcs n LEFT JOIN relationships r ON r.npc_id=n.id ORDER BY n.rowid")?; let rows=stmt.query_map([], |r| Ok(Npc{id:r.get(0)?,name:r.get(1)?,role:r.get(2)?,relationship:r.get(3)?,stage:r.get(4)?,avatar:r.get(5)?,personality:r.get(6)?,favorite_item:r.get(7)?,home_location:r.get(8)?}))?; rows.collect::<Result<Vec<_>,_>>()? };
         let next = self.value("next_normal_check")?.and_then(|v| v.parse().ok());
         let memories = {
             let mut stmt = self.db.prepare("SELECT summary FROM memories ORDER BY created_at DESC LIMIT 50")?;
@@ -165,7 +186,7 @@ impl Engine {
             let rows = stmt.query_map([], |r| Ok(PersonalityEvidence { trait_name: r.get(0)?, delta: r.get(1)?, event_id: r.get(2)?, reason: r.get(3)? }))?;
             rows.collect::<Result<Vec<_>, _>>()?
         };
-        Ok(WorldSnapshot { name:self.value("name")?.unwrap_or_else(||"Aoi".into()), level:self.number("level",1), xp:self.number("xp",0), next_xp:self.number("next_xp",100), mood:self.number("mood",50), energy:self.number("energy",50), location:self.value("location")?.unwrap_or_default(), weather:self.value("weather")?.unwrap_or_default(), status:self.value("status")?.unwrap_or_else(||"正在休息".into()), animation:self.value("animation")?.unwrap_or_else(||"idle".into()), traits, skills:self.json("skills", vec![]), inventory:self.json("inventory", vec![]), goals:self.json("goals", vec![]), npcs, events, world_time:now.format("%H:%M").to_string(), last_update:self.value("last_update")?.unwrap_or_else(||now.to_rfc3339()), important_today, next_normal_check:next, memory_context:self.memory_context(), memories, personality_evidence })
+        Ok(WorldSnapshot { name:self.value("name")?.unwrap_or_else(||"Aoi".into()), level:self.number("level",1), xp:self.number("xp",0), next_xp:self.number("next_xp",100), mood:self.number("mood",50), energy:self.number("energy",50), health:self.number("health",100), intelligence:self.number("intelligence",50), friendship:self.number("friendship",0), curiosity:self.number("curiosity",50), creativity:self.number("creativity",50), courage:self.number("courage",50), money:self.number("money",0), location:self.value("location")?.unwrap_or_default(), weather:self.value("weather")?.unwrap_or_default(), status:self.value("status")?.unwrap_or_else(||"正在休息".into()), animation:self.value("animation")?.unwrap_or_else(||"idle".into()), traits, skills:self.json("skills", vec![]), inventory:self.json("inventory", vec![]), goals:self.json("goals", vec![]), npcs, known_locations:self.json("known_locations", vec![]), events, world_time:now.format("%H:%M").to_string(), last_update:self.value("last_update")?.unwrap_or_else(||now.to_rfc3339()), important_today, next_normal_check:next, memory_context:self.memory_context(), memories, personality_evidence, day_count:self.number("day_count",1), total_play_time:self.value("total_play_time")?.and_then(|v|v.parse().ok()).unwrap_or(0), current_behavior:self.value("current_behavior")?.unwrap_or_else(||"idle".into()) })
     }
 
     fn events(&self) -> rusqlite::Result<Vec<EventRecord>> { let mut stmt=self.db.prepare("SELECT id,timestamp,type,summary,importance,location,participants,causes FROM events ORDER BY timestamp DESC")?; let rows=stmt.query_map([], |r| Ok(EventRecord{id:r.get(0)?,timestamp:r.get(1)?,event_type:r.get(2)?,summary:r.get(3)?,importance:r.get(4)?,location:r.get(5)?,participants:serde_json::from_str(&r.get::<_,String>(6)?).unwrap_or_default(),causes:serde_json::from_str(&r.get::<_,String>(7)?).unwrap_or_default()}))?; rows.collect()
@@ -189,6 +210,23 @@ impl Engine {
 
     pub fn scheduler_tick(&mut self) -> rusqlite::Result<Option<String>> {
         let now = Local::now().timestamp();
+        let Some(last_value) = self.value("last_update")? else {
+            let tx = self.db.transaction()?;
+            Self::set(&tx, "last_update", Local::now().to_rfc3339())?;
+            Self::set(&tx, "next_normal_check", now + 10 * 60)?;
+            Self::set(&tx, "birth_day", now / 86400)?;
+            tx.commit()?;
+            return Ok(None);
+        };
+        let last = DateTime::parse_from_rfc3339(&last_value).ok().map(|v| v.timestamp()).unwrap_or(now);
+        let elapsed = (now - last).clamp(0, 24 * 3600);
+        if elapsed > 0 {
+            self.simulate_elapsed(now, elapsed)?;
+        }
+        let now = Local::now().timestamp();
+        if let Some(kind) = self.run_time_constraints(Local::now())? {
+            return Ok(Some(kind));
+        }
         let normal_due = self.value("next_normal_check")?.and_then(|v| v.parse::<i64>().ok()).map(|next| now >= next).unwrap_or(true);
         if normal_due {
             return Ok(Some("normal".into()));
@@ -204,14 +242,243 @@ impl Engine {
         let target = self.number("important_target_per_day", 2) as f32;
         let random_factor = ((now.rem_euclid(1000)) as f32 / 1000.0).clamp(0.0, 1.0);
         let context = crate::scheduler::WindowContext { hours_since_important: hours_since, important_today, recent_event_count: recent_count, goal_pressure: 0.4, relationship_opportunity: 0.4, random_factor };
-        let selected = crate::scheduler::should_schedule(context, target);
+        let selected = important_today < 3 && self.important_day_allowed(Local::now()) && crate::scheduler::should_schedule(context, target);
         let tx = self.db.transaction()?;
         Self::set(&tx, "next_important_check", now + 4 * 3600)?;
         tx.commit()?;
         Ok(selected.then_some("important".into()))
     }
 
-    pub fn reset(&mut self) -> rusqlite::Result<()> { self.db.execute_batch("DELETE FROM world_state; DELETE FROM events; DELETE FROM personality_evidence; DELETE FROM relationships; DELETE FROM shared_experiences; DELETE FROM memories; DELETE FROM inventory; DELETE FROM skills; DELETE FROM goals; DELETE FROM personality_traits; DELETE FROM npcs; DELETE FROM characters; DELETE FROM important_people;")?; self.seed_defaults() }
+    fn run_time_constraints(&mut self, now: DateTime<Local>) -> rusqlite::Result<Option<String>> {
+        let hour = now.hour();
+        let minute = now.minute();
+        let in_window = |start: u32, end: u32| {
+            let current = hour * 60 + minute;
+            current >= start && current <= end
+        };
+        let date = if hour < 8 { (now - chrono::Duration::days(1)).format("%Y-%m-%d") } else { now.format("%Y-%m-%d") };
+        let rules = [
+            ("breakfast", 7 * 60, 10 * 60, "吃了早饭，开始准备今天的生活。", "activity_event"),
+            ("lunch", 11 * 60 + 30, 14 * 60, "吃了一顿午饭，能量恢复了一些。", "activity_event"),
+            ("dinner", 17 * 60 + 30, 21 * 60, "吃了晚饭，回顾今天发生的事情。", "activity_event"),
+            ("sleep", 22 * 60, 8 * 60, "进入睡眠，安静地恢复能量。", "activity_event"),
+            ("special_activity", 19 * 60, 22 * 60, "参加了一次夜间特别活动，发现了新的线索。", "discovery_event"),
+        ];
+        for (key, start, end, summary, event_type) in rules {
+            let matches = if key == "sleep" { hour >= 22 || hour < 8 } else { in_window(start, end) };
+            if !matches { continue; }
+            let marker = format!("time_event_{}_{}", date, key);
+            if self.value(&marker)?.is_some() { continue; }
+            let id = format!("timed-{}-{}", key, now.timestamp());
+            let location = self.value("location")?.unwrap_or_default();
+            let energy = (self.number("energy", 50) + 8).min(100);
+            let tx = self.db.transaction()?;
+            tx.execute("INSERT INTO events(id,timestamp,type,summary,importance,location,causes,participants) VALUES (?1,?2,?3,?4,?5,?6,'[]','[\"main\"]')",
+                params![id, now.to_rfc3339(), event_type, summary, if key == "special_activity" { 0.55 } else { 0.18 }, location])?;
+            Self::set(&tx, &marker, "1")?;
+            if key == "sleep" { Self::set(&tx, "energy", energy)?; }
+            tx.commit()?;
+            return Ok(Some(key.into()));
+        }
+        Ok(None)
+    }
+
+    fn important_day_allowed(&self, now: DateTime<Local>) -> bool {
+        if let Some(days) = self.value("important_days").ok().flatten().and_then(|v| serde_json::from_str::<Vec<u32>>(&v).ok()) {
+            if !days.is_empty() && !days.contains(&now.weekday().number_from_monday()) { return false; }
+        }
+        if let Some(dates) = self.value("important_dates").ok().flatten().and_then(|v| serde_json::from_str::<Vec<String>>(&v).ok()) {
+            if !dates.is_empty() && !dates.contains(&now.format("%Y-%m-%d").to_string()) { return false; }
+        }
+        true
+    }
+
+    fn simulate_elapsed(&mut self, now: i64, elapsed: i64) -> rusqlite::Result<()> {
+        let offline = elapsed > 15 * 60;
+        let minutes = (elapsed / 60).min(24 * 60);
+        if minutes == 0 { return Ok(()); }
+        let mut energy = self.number("energy", 50) as f32;
+        let mut mood = self.number("mood", 50) as f32;
+        let mut health = self.number("health", 100) as f32;
+        let mut curiosity = self.number("curiosity", 50) as f32;
+        let intelligence = self.number("intelligence", 50) as f32;
+        let friendship = self.number("friendship", 0) as f32;
+        let creativity = self.number("creativity", 50) as f32;
+        let courage = self.number("courage", 50) as f32;
+        let mut xp = self.number("xp", 0);
+        let mut level = self.number("level", 1);
+        let mut next_xp = self.number("next_xp", 100);
+        let mut locations: Vec<Location> = self.json("known_locations", vec![]);
+        let mut behavior = self.value("current_behavior")?.unwrap_or_else(|| "idle".into());
+        let mut behavior_until = self.value("behavior_until")?.and_then(|v| v.parse::<i64>().ok()).unwrap_or(0);
+        let mut event_count = 0;
+        let seed = now as u64 ^ elapsed as u64;
+
+        for minute in 0..minutes {
+            let cursor = now - (minutes - minute) * 60;
+            if offline {
+                behavior = if energy < 35.0 { "sleep".into() } else { "rest".into() };
+                energy += if behavior == "sleep" { 0.30 } else { 0.04 };
+                mood += if behavior == "sleep" { 0.04 } else { 0.0 };
+            } else {
+                if energy < 5.0 {
+                    behavior = "sleep".into();
+                    behavior_until = cursor + 180;
+                } else if cursor >= behavior_until {
+                    let roll = unit(seed.wrapping_add(minute as u64 * 7919));
+                    behavior = choose_behavior(roll, energy, mood, intelligence, friendship, curiosity, creativity, courage);
+                    behavior_until = cursor + 30 + ((unit(seed + minute as u64 * 104729) * 150.0) as i64);
+                }
+                let cost = match behavior.as_str() {
+                    "sleep" => -0.30,
+                    "play" => -0.08,
+                    "explore" => -0.10,
+                    "work" => -0.12,
+                    "run" => -0.18,
+                    "social" => -0.06,
+                    "observe" => -0.03,
+                    _ => -0.02,
+                };
+                energy += cost;
+                if behavior == "play" { mood += 0.08 + creativity * 0.0005; }
+                if behavior == "explore" { curiosity += 0.02; }
+                if behavior == "work" { xp += (intelligence / 100.0) as i32; }
+                if behavior == "social" { mood += friendship * 0.0005; }
+                if behavior == "explore" {
+                    if let Some(location) = locations.iter_mut().find(|item| item.name == self.value("location").ok().flatten().unwrap_or_default()) {
+                        location.exploration = (location.exploration + 1).min(100);
+                    }
+                }
+                if energy < 20.0 { mood -= 0.03; }
+                if energy < 5.0 { mood -= 0.08; }
+                health += if energy < 5.0 { -0.02 } else { 0.01 };
+                // One low-volume ambient event at most every ten simulated minutes.
+                let event_chance = (0.25 + intelligence * 0.001 + creativity * 0.001).min(0.45);
+                if minute % 10 == 9 && unit(seed + minute as u64 * 31) < event_chance {
+                    self.insert_simulation_event(cursor, &behavior, &mut event_count)?;
+                    xp += 1 + (unit(seed + minute as u64 * 17) * 5.0) as i32;
+                }
+                let discovery_modifier = (0.55 + curiosity * 0.006 + courage * 0.004).clamp(0.55, 1.6);
+                if behavior == "explore" && energy > 30.0 && unit(seed + minute as u64 * 97) < 0.025 * discovery_modifier {
+                    self.generate_npc(cursor, seed + minute as u64)?;
+                    mood += 5.0;
+                    xp += 10;
+                }
+                if behavior == "explore" && energy > 30.0 && unit(seed + minute as u64 * 131) < 0.015 * (0.7 + curiosity * 0.006 + courage * 0.004) {
+                    self.generate_location(cursor, seed + minute as u64)?;
+                    mood += 3.0;
+                    curiosity += 1.0;
+                }
+            }
+            energy = energy.clamp(0.0, 100.0);
+            mood = mood.clamp(0.0, 100.0);
+            health = health.clamp(0.0, 100.0);
+            curiosity = curiosity.clamp(0.0, 100.0);
+        }
+        let total = self.value("total_play_time")?.and_then(|v| v.parse::<i64>().ok()).unwrap_or(0) + if offline { 0 } else { elapsed };
+        let day_count = (now / 86400) - (self.value("birth_day")?.and_then(|v| v.parse().ok()).unwrap_or(now / 86400)) + 1;
+        while xp >= next_xp {
+            xp -= next_xp;
+            level += 1;
+            next_xp = (next_xp as f32 * 1.35).round() as i32;
+        }
+        let tx = self.db.transaction()?;
+        Self::set(&tx, "energy", energy.round() as i32)?;
+        Self::set(&tx, "mood", mood.round() as i32)?;
+        Self::set(&tx, "health", health.round() as i32)?;
+        Self::set(&tx, "curiosity", curiosity.round() as i32)?;
+        Self::set(&tx, "xp", xp)?;
+        Self::set(&tx, "level", level)?;
+        Self::set(&tx, "next_xp", next_xp)?;
+        Self::set(&tx, "current_behavior", &behavior)?;
+        Self::set(&tx, "behavior_until", behavior_until)?;
+        Self::set(&tx, "total_play_time", total)?;
+        Self::set(&tx, "day_count", day_count)?;
+        Self::set(&tx, "known_locations", serde_json::to_string(&locations).unwrap())?;
+        Self::set(&tx, "last_update", Local::now().to_rfc3339())?;
+        Self::set(&tx, "next_normal_check", now + 10 * 60)?;
+        tx.commit()
+    }
+
+    fn insert_simulation_event(&self, timestamp: i64, behavior: &str, count: &mut i32) -> rusqlite::Result<()> {
+        let (event_type, summary, importance) = match behavior {
+            "play" => ("activity_event", "进行了一会儿轻松的玩耍", 0.15),
+            "explore" => ("discovery_event", "观察周围环境，留下了一条新的记录", 0.24),
+            "social" => ("social_event", "和路过的人进行了简短交流", 0.28),
+            "sleep" => ("activity_event", "安静地休息了一会儿", 0.12),
+            _ => ("normal_event", "度过了一段平静的时间", 0.10),
+        };
+        let id = format!("sim-{}-{}", timestamp, *count);
+        let now = chrono::DateTime::<chrono::Utc>::from_timestamp(timestamp, 0)
+            .map(|value| value.to_rfc3339())
+            .unwrap_or_else(|| Local::now().to_rfc3339());
+        self.db.execute("INSERT OR IGNORE INTO events(id,timestamp,type,summary,importance,location,causes,participants) VALUES (?1,?2,?3,?4,?5,?6,'[]','[\"main\"]')",
+            params![id, now, event_type, summary, importance, self.value("location")?.unwrap_or_default()])?;
+        *count += 1;
+        Ok(())
+    }
+
+    fn generate_npc(&mut self, timestamp: i64, seed: u64) -> rusqlite::Result<()> {
+        let names = ["Mika", "Sora", "Nia", "Kaito", "Lena", "Tomo"];
+        let roles = ["面包师", "园丁", "修理师", "研究员", "旅行者", "音乐教师"];
+        let personalities = ["温和而细心", "好奇健谈", "安静可靠", "热情直接", "谨慎聪明"];
+        let index = (seed as usize) % names.len();
+        let id = format!("npc-{}", timestamp);
+        let name = names[index];
+        let role = roles[(seed as usize / 3) % roles.len()];
+        let personality = personalities[(seed as usize / 7) % personalities.len()];
+        let location = self.value("location")?.unwrap_or_else(|| "Home".into());
+        let favorite = ["书签", "热茶", "齿轮", "画笔", "星图"][(seed as usize / 11) % 5];
+        let tx = self.db.transaction()?;
+        tx.execute("INSERT OR IGNORE INTO npcs(id,name,role,avatar,personality,favorite_item,home_location) VALUES (?1,?2,?3,?4,?5,?6,?7)",
+            params![id, name, role, name.chars().next().unwrap_or('N').to_string(), personality, favorite, location])?;
+        tx.execute("INSERT OR IGNORE INTO relationships(npc_id,score,stage) VALUES (?1,?2,'acquaintance')",
+            params![id, (seed % 21) as i32])?;
+        tx.execute("INSERT OR IGNORE INTO events(id,timestamp,type,summary,importance,location,causes,participants) VALUES (?1,?2,'relationship_event',?3,0.72,?4,'[]',?5)",
+            params![format!("npc-event-{}", timestamp), Local::now().to_rfc3339(), format!("认识了新的{}：{}，对方是一位{}。", role, name, personality), location, serde_json::to_string(&vec!["main", &id]).unwrap()])?;
+        tx.commit()
+    }
+
+    fn generate_location(&mut self, timestamp: i64, seed: u64) -> rusqlite::Result<()> {
+        let candidates = [
+            ("Riverside", "A quiet path beside the water.", "common"),
+            ("Clock Tower", "An old tower filled with soft mechanical sounds.", "uncommon"),
+            ("Moon Garden", "A hidden garden that only opens at night.", "rare"),
+            ("Sky Archive", "A legendary archive above the clouds.", "legendary"),
+        ];
+        let (name, description, rarity) = candidates[(seed as usize) % candidates.len()];
+        let mut locations: Vec<Location> = self.json("known_locations", vec![]);
+        if locations.iter().any(|item| item.name == name) { return Ok(()); }
+        locations.push(Location { name: name.into(), description: description.into(), exploration: 0, rarity: rarity.into() });
+        let tx = self.db.transaction()?;
+        Self::set(&tx, "known_locations", serde_json::to_string(&locations).unwrap())?;
+        tx.execute("INSERT OR IGNORE INTO events(id,timestamp,type,summary,importance,location,causes,participants) VALUES (?1,?2,'discovery_event',?3,0.62,?4,'[]','[\"main\"]')",
+            params![format!("location-event-{}", timestamp), Local::now().to_rfc3339(), format!("发现了新地点：{}", name), name])?;
+        tx.commit()
+    }
+
+    pub fn reset(&mut self) -> rusqlite::Result<()> {
+        self.db.execute_batch("DELETE FROM world_state; DELETE FROM events; DELETE FROM personality_evidence; DELETE FROM relationships; DELETE FROM shared_experiences; DELETE FROM memories; DELETE FROM inventory; DELETE FROM skills; DELETE FROM goals; DELETE FROM personality_traits; DELETE FROM npcs; DELETE FROM characters; DELETE FROM important_people;")?;
+        self.seed_defaults()?;
+        let locations = r#"[{"name":"家","description":"可以休息和整理物品的地方。","exploration":0,"rarity":"common"},{"name":"学校","description":"学习、完成任务和认识新朋友的地方。","exploration":0,"rarity":"common"},{"name":"便利店","description":"可以买到日常用品和简单食物。","exploration":0,"rarity":"common"},{"name":"公园","description":"适合散步、玩耍和观察环境。","exploration":0,"rarity":"common"},{"name":"街道","description":"连接各个地点的日常道路。","exploration":0,"rarity":"common"}]"#;
+        let names = ["小雨", "晴", "阿岚", "小夏", "星野"];
+        let seed = Local::now().timestamp_nanos_opt().unwrap_or_default().unsigned_abs() as usize;
+        let name = names[seed % names.len()];
+        let location = ["家", "学校", "便利店", "公园", "街道"][seed % 5];
+        let npc_id = format!("npc-initial-{}", seed);
+        let tx = self.db.transaction()?;
+        for (key, value) in [("energy", "100"), ("mood", "100"), ("health", "100"), ("intelligence", "10"), ("friendship", "10"), ("curiosity", "10"), ("creativity", "10"), ("courage", "10"), ("location", location), ("current_behavior", "idle"), ("day_count", "1"), ("total_play_time", "0"), ("last_update", &Local::now().to_rfc3339()), ("next_normal_check", &(Local::now().timestamp() + 600).to_string())] {
+            Self::set(&tx, key, value)?;
+        }
+        Self::set(&tx, "known_locations", locations)?;
+        Self::set(&tx, "inventory", r#"[{"name":"书包","detail":"一个可以装下日常物品的书包。","icon":"backpack"}]"#)?;
+        Self::set(&tx, "skills", "[]")?;
+        tx.execute("INSERT INTO npcs(id,name,role,avatar,personality,favorite_item,home_location) VALUES (?1,?2,'朋友',?3,'友善、愿意一起探索','书签',?4)",
+            params![npc_id, name, name.chars().next().unwrap_or('友').to_string(), location])?;
+        tx.execute("INSERT INTO relationships(npc_id,score,stage) VALUES (?1,10,'friend')", params![npc_id])?;
+        tx.execute("INSERT INTO inventory(id,name,quantity,description) VALUES ('backpack','书包',1,'一个可以装下日常物品的书包。')", [])?;
+        tx.commit()
+    }
 
     pub fn apply(&mut self, p: EventProposal) -> rusqlite::Result<WorldSnapshot> {
         if p.event_type == "no_event" {
@@ -219,7 +486,7 @@ impl Engine {
         }
         if !EVENT_TYPES.contains(&p.event_type.as_str()) { return Err(rusqlite::Error::InvalidParameterName("invalid event type".into())); }
         if p.summary.trim().is_empty() || p.summary.chars().count()>160 { return Err(rusqlite::Error::InvalidParameterName("summary must be 1-160 characters".into())); }
-        let xp=self.number("xp",0); let mut level=self.number("level",1); let mut next=self.number("next_xp",100); let mood=(self.number("mood",50)+p.effects.mood).clamp(0,100); let energy=(self.number("energy",50)+p.effects.energy).clamp(0,100); let new_xp_delta=p.xp_delta().clamp(0,50); let mut total=xp+new_xp_delta;
+        let xp=self.number("xp",0); let mut level=self.number("level",1); let mut next=self.number("next_xp",100); let mood=(self.number("mood",50)+p.effects.mood).clamp(0,100); let energy=(self.number("energy",50)+p.effects.energy).clamp(0,100); let health=(self.number("health",100)+p.effects.health).clamp(0,100); let intelligence=(self.number("intelligence",50)+p.effects.intelligence).clamp(0,100); let friendship=(self.number("friendship",0)+p.effects.friendship).clamp(0,100); let curiosity=(self.number("curiosity",50)+p.effects.curiosity).clamp(0,100); let creativity=(self.number("creativity",50)+p.effects.creativity).clamp(0,100); let courage=(self.number("courage",50)+p.effects.courage).clamp(0,100); let money=self.number("money",0)+p.effects.money; let new_xp_delta=p.xp_delta().clamp(0,50); let mut total=xp+new_xp_delta;
         while total>=next { total-=next; level+=1; next=(next as f32*1.35).round() as i32; }
         let now:DateTime<Local>=Local::now(); let id=format!("event-{}",now.timestamp_millis()); let rel=p.relationship().map(|r|(r.target.clone(),r.delta.clamp(-5,5)));
         let item_effect=p.effects.item.clone(); let skill_effect=p.effects.skill.clone(); let goal_effect=p.effects.goal.clone();
@@ -229,7 +496,7 @@ impl Engine {
         let mut goals: Vec<Goal> = self.json("goals", vec![]);
         let tx=self.db.transaction()?;
         tx.execute("INSERT INTO events(id,timestamp,type,summary,importance,location,causes,participants) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",params![&id,now.to_rfc3339(),&p.event_type,&p.summary,p.importance.clamp(0.0,1.0),&p.location,serde_json::to_string(&p.causes).unwrap(),serde_json::to_string(&p.participants).unwrap()])?;
-        Self::set(&tx,"xp",total)?; Self::set(&tx,"level",level)?; Self::set(&tx,"next_xp",next)?; Self::set(&tx,"mood",mood)?; Self::set(&tx,"energy",energy)?; Self::set(&tx,"location",&p.location)?; Self::set(&tx,"last_update",now.to_rfc3339())?; Self::set(&tx,"next_normal_check",now.timestamp()+1800)?;
+        Self::set(&tx,"xp",total)?; Self::set(&tx,"level",level)?; Self::set(&tx,"next_xp",next)?; Self::set(&tx,"mood",mood)?; Self::set(&tx,"energy",energy)?; Self::set(&tx,"health",health)?; Self::set(&tx,"intelligence",intelligence)?; Self::set(&tx,"friendship",friendship)?; Self::set(&tx,"curiosity",curiosity)?; Self::set(&tx,"creativity",creativity)?; Self::set(&tx,"courage",courage)?; Self::set(&tx,"money",money)?; Self::set(&tx,"location",&p.location)?; Self::set(&tx,"last_update",now.to_rfc3339())?; Self::set(&tx,"next_normal_check",now.timestamp()+1800)?;
         if let Some((target,delta))=rel {
             let score: i32 = tx.query_row("SELECT score FROM relationships WHERE npc_id=?1", params![target], |row| row.get(0)).optional()?.unwrap_or(0);
             let updated = (score + delta).clamp(0, 100);
@@ -314,6 +581,43 @@ impl Engine {
     }
 }
 
+fn unit(seed: u64) -> f32 {
+    let mut value = seed ^ 0x9E3779B97F4A7C15;
+    value = value.wrapping_mul(0xBF58476D1CE4E5B9);
+    value ^= value >> 27;
+    (value as f64 / u64::MAX as f64) as f32
+}
+
+fn choose_behavior(roll: f32, energy: f32, mood: f32, intelligence: f32, friendship: f32, curiosity: f32, creativity: f32, courage: f32) -> String {
+    let mut weights = vec![
+        ("idle", 25.0), ("observe", 15.0), ("play", 15.0), ("sleep", 10.0),
+        ("explore", 10.0), ("work", 10.0), ("social", 8.0), ("special", 7.0),
+    ];
+    weights[2].1 *= 0.8 + creativity / 100.0;
+    weights[4].1 *= 0.7 + (curiosity + courage) / 100.0;
+    weights[5].1 *= 0.7 + intelligence / 100.0;
+    weights[6].1 *= 0.7 + friendship / 100.0;
+    weights[7].1 *= 0.7 + (creativity + courage) / 100.0;
+    if energy < 20.0 {
+        for (name, weight) in &mut weights {
+            if *name == "play" || *name == "explore" || *name == "work" || *name == "special" { *weight *= 0.3; }
+            if *name == "sleep" { *weight *= 3.0; }
+        }
+    }
+    if mood > 80.0 {
+        for (name, weight) in &mut weights {
+            if *name == "explore" || *name == "social" { *weight *= 1.5; }
+        }
+    }
+    let total: f32 = weights.iter().map(|(_, weight)| *weight).sum();
+    let mut cursor = roll.clamp(0.0, 0.9999) * total;
+    for (name, weight) in weights {
+        if cursor < weight { return name.into(); }
+        cursor -= weight;
+    }
+    "idle".into()
+}
+
 fn relationship_stage(score: i32) -> &'static str {
     match score {
         0..=19 => "acquaintance",
@@ -369,6 +673,8 @@ mod tests {
     #[test]
     fn relationship_updates_stage() {
         let mut engine = engine();
+        engine.db.execute("INSERT INTO npcs(id,name,role,avatar) VALUES ('yuki','Yuki','traveler','Y')", []).unwrap();
+        engine.db.execute("INSERT INTO relationships(npc_id,score,stage) VALUES ('yuki',18,'acquaintance')", []).unwrap();
         let snapshot = engine.apply(EventProposal {
             event_type: "relationship_event".into(), summary: "关系变化".into(), importance: 0.5,
             location: "图书馆".into(), effects: EventEffects { relationship: Some(RelationshipEffect { target: "yuki".into(), delta: 5 }), ..Default::default() },

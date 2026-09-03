@@ -4,14 +4,17 @@ mod llm;
 mod scheduler;
 
 use std::sync::Mutex;
+use std::time::Duration;
 use tauri::{Emitter, Manager, Position, PhysicalPosition, State, WindowEvent};
 use world::{Engine, EventProposal, WorldSnapshot};
 use llm::ProviderConfig;
 
 #[cfg(windows)]
 fn configure_pet_window(window: &tauri::WebviewWindow) {
-    use windows_sys::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_NCRENDERING_POLICY, DWMNCRP_DISABLED};
-    use windows_sys::Win32::UI::WindowsAndMessaging::{GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, GWL_EXSTYLE, GWL_STYLE, SWP_FRAMECHANGED, SWP_NOMOVE, SWP_NOSIZE, SWP_NOACTIVATE, SWP_NOZORDER, HWND_TOP, WS_BORDER, WS_CAPTION, WS_DLGFRAME, WS_EX_APPWINDOW, WS_EX_CLIENTEDGE, WS_EX_DLGMODALFRAME, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_STATICEDGE, WS_EX_TOOLWINDOW, WS_EX_WINDOWEDGE, WS_THICKFRAME};
+    #[repr(C)]
+    struct Margins { cx_left_width: i32, cx_right_width: i32, cy_top_height: i32, cy_bottom_height: i32 }
+    use windows_sys::Win32::Graphics::Dwm::{DwmExtendFrameIntoClientArea, DwmSetWindowAttribute, DWMWA_NCRENDERING_POLICY, DWMNCRP_DISABLED};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, GWL_EXSTYLE, GWL_STYLE, SWP_FRAMECHANGED, SWP_NOMOVE, SWP_NOSIZE, SWP_NOACTIVATE, SWP_NOZORDER, HWND_TOP, WS_BORDER, WS_CAPTION, WS_DLGFRAME, WS_EX_APPWINDOW, WS_EX_CLIENTEDGE, WS_EX_DLGMODALFRAME, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_STATICEDGE, WS_EX_TOOLWINDOW, WS_EX_WINDOWEDGE, WS_POPUP, WS_THICKFRAME};
     let Ok(hwnd) = window.hwnd() else {
         eprintln!("[window] failed to get pet HWND");
         return;
@@ -24,11 +27,15 @@ fn configure_pet_window(window: &tauri::WebviewWindow) {
         SetWindowLongPtrW(hwnd.0 as _, GWL_EXSTYLE, flags);
         let window_style = GetWindowLongPtrW(hwnd.0 as _, GWL_STYLE);
         let frame_flags = (WS_BORDER | WS_CAPTION | WS_DLGFRAME | WS_THICKFRAME) as isize;
-        SetWindowLongPtrW(hwnd.0 as _, GWL_STYLE, window_style & !frame_flags);
+        SetWindowLongPtrW(hwnd.0 as _, GWL_STYLE, (window_style & !frame_flags) | WS_POPUP as isize);
         SetWindowPos(hwnd.0 as _, HWND_TOP, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
         let policy = DWMNCRP_DISABLED;
         let result = DwmSetWindowAttribute(hwnd.0 as _, DWMWA_NCRENDERING_POLICY as _, &policy as *const _ as _, std::mem::size_of_val(&policy) as u32);
-        eprintln!("[window] pet native styles applied hwnd={} dwm_result={}", hwnd.0 as usize, result);
+        // Extend the client area through the entire native frame. This removes the
+        // single-pixel top edge that WebView2 can leave on transparent popup windows.
+        let margins = Margins { cx_left_width: -1, cx_right_width: -1, cy_top_height: -1, cy_bottom_height: -1 };
+        let glass_result = DwmExtendFrameIntoClientArea(hwnd.0 as _, &margins as *const Margins as *const _);
+        eprintln!("[window] pet native styles applied hwnd={} dwm_result={} glass_result={}", hwnd.0 as usize, result, glass_result);
     }
 }
 
@@ -37,7 +44,9 @@ fn configure_pet_window(_window: &tauri::WebviewWindow) {}
 
 #[tauri::command]
 fn get_world(engine: State<'_, Mutex<Engine>>) -> Result<WorldSnapshot, String> {
-    engine.lock().map_err(|e| e.to_string())?.snapshot().map_err(|e| e.to_string())
+    let mut guard = engine.lock().map_err(|e| e.to_string())?;
+    let _ = guard.scheduler_tick();
+    guard.snapshot().map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -132,20 +141,31 @@ pub fn run() {
     tauri::Builder::default()
         .manage(Mutex::new(Engine::open().expect("world storage")))
         .on_window_event(|window, event| {
-            if let WindowEvent::Moved(_) = event {
-                if window.label() == "pet" {
-                    if let (Ok(position), Some(chronicle)) = (window.outer_position(), window.app_handle().get_webview_window("chronicle")) {
-                        let _ = chronicle.set_position(Position::Physical(PhysicalPosition::new(position.x + 245, position.y)));
+            match event {
+                WindowEvent::Moved(_) => {
+                    if window.label() == "pet" {
+                        if let Some(pet) = window.app_handle().get_webview_window("pet") {
+                            configure_pet_window(&pet);
+                        }
+                        if let (Ok(position), Some(chronicle)) = (window.outer_position(), window.app_handle().get_webview_window("chronicle")) {
+                            let _ = chronicle.set_position(Position::Physical(PhysicalPosition::new(position.x + 245, position.y)));
+                        }
                     }
                 }
+                WindowEvent::Focused(true) if window.label() == "pet" => {
+                    if let Some(pet) = window.app_handle().get_webview_window("pet") {
+                        configure_pet_window(&pet);
+                    }
+                }
+                _ => {}
             }
         })
         .setup(|app| {
             if let Some(pet) = app.get_webview_window("pet") {
-                configure_pet_window(&pet);
                 let _ = pet.set_decorations(false);
                 let _ = pet.set_shadow(false);
                 let _ = pet.set_background_color(Some(tauri::window::Color(0, 0, 0, 0)));
+                configure_pet_window(&pet);
             }
             let toggle = tauri::menu::MenuItemBuilder::with_id("toggle_chronicle", "Show / Hide Chronicle").build(app)?;
             let settings = tauri::menu::MenuItemBuilder::with_id("settings", "Settings").build(app)?;
@@ -167,6 +187,19 @@ pub fn run() {
                 "exit" => app.exit(0),
                 _ => {}
             }).build(app)?;
+            let handle = app.handle().clone();
+            std::thread::spawn(move || loop {
+                std::thread::sleep(Duration::from_secs(60));
+                let Some(state) = handle.try_state::<Mutex<Engine>>() else { continue; };
+                let Ok(mut engine) = state.lock() else { continue; };
+                if let Err(error) = engine.scheduler_tick() {
+                    eprintln!("[scheduler] tick failed: {}", error);
+                    continue;
+                }
+                if let Ok(snapshot) = engine.snapshot() {
+                    let _ = handle.emit("world-updated", &snapshot);
+                }
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![get_world, apply_proposal, reset_world, scheduler_tick, toggle_chronicle, test_provider, generate_event])
