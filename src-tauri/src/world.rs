@@ -950,8 +950,17 @@ impl Engine {
         self.enforce_location_schedule(Local::now())?;
         if self.in_rest_period(Local::now()) {
             p.location = "家".into();
-        } else if let Some(location) = self.value("location")? {
-            p.location = location;
+        } else {
+            let known_locations: Vec<Location> = self.json("known_locations", vec![]);
+            if p.location.trim().is_empty() || !known_locations.iter().any(|location| location.name == p.location) {
+                p.location = self.value("location")?.unwrap_or_default();
+            }
+        }
+        if !self.in_rest_period(Local::now()) {
+            let known_locations: Vec<Location> = self.json("known_locations", vec![]);
+            if p.location.trim().is_empty() || !known_locations.iter().any(|location| location.name == p.location) {
+                p.location = self.value("location")?.unwrap_or_default();
+            }
         }
         if is_sleep_event(&p) && !self.in_rest_period(Local::now()) {
             eprintln!("[event] rejected sleep event outside configured rest period");

@@ -94,7 +94,7 @@ async fn initialize_world_ai(app: tauri::AppHandle, engine: State<'_, Mutex<Engi
     if base_url.trim().is_empty() || model.trim().is_empty() || api_key.as_deref().unwrap_or_default().trim().is_empty() {
         return Err("Base URL, model and API key are required for AI initialization".into());
     }
-    let mut prompt = format!(
+    let prompt = format!(
         "Create the initial world seed for a desktop pet life simulation. Return exactly one valid JSON object with no Markdown. Schema: {{\"item\":{{\"name\":\"string\",\"description\":\"string\"}},\"locations\":[{{\"name\":\"string\",\"description\":\"string\",\"exploration\":0,\"rarity\":\"common\"}}],\"npc\":{{\"id\":\"zhaoran\",\"name\":\"zhaoran\",\"role\":\"string\",\"personality\":\"string\",\"favoriteItem\":\"string\",\"homeLocation\":\"string\",\"relationship\":0-100,\"relationshipNote\":\"string\",\"avatar\":\"\"}}}}. Generate exactly 4 basic locations based on the world setting, not 5. Generate exactly 1 starting item with a concrete useful description. Generate exactly 1 starting person: name and id must be zhaoran, but role/personality/favoriteItem/homeLocation/relationship/relationshipNote must be generated from the setting. role must be an identity or occupation such as 学生, 老师, 店员, 医生, 图书管理员, 插画师, 程序员, 研究员; never use 朋友/friend as role. If zhaoran's home is 家/Home, write homeLocation as zhaoran的家. Keep all Chinese text natural and concise. WORLD SETTING: {}. MAIN CHARACTER: name={}, tags={}, personality={}, experiences={}, interests={}, behavior={}. Sprite grid: {} columns x {} rows.",
         config.world_background,
         config.name,
@@ -196,14 +196,15 @@ async fn test_provider(base_url: String, model: String, api_key: Option<String>)
 }
 
 #[tauri::command]
-async fn generate_event(app: tauri::AppHandle, engine: State<'_, Mutex<Engine>>, base_url: String, model: String, api_key: Option<String>, language: Option<String>, character_context: Option<String>, rest_start: Option<i32>, rest_end: Option<i32>) -> Result<WorldSnapshot, String> {
+async fn generate_event(app: tauri::AppHandle, engine: State<'_, Mutex<Engine>>, base_url: String, model: String, api_key: Option<String>, language: Option<String>, character_context: Option<String>, rest_start: Option<i32>, rest_end: Option<i32>, manual: Option<bool>) -> Result<WorldSnapshot, String> {
     let start = rest_start.unwrap_or(22).clamp(0, 23);
     let end = rest_end.unwrap_or(8).clamp(0, 23);
+    let is_manual = manual.unwrap_or(false);
     let tick_id = format!("tick-{}", Local::now().timestamp() / 600);
-    {
+    if !is_manual {
         let guard = engine.lock().map_err(|e| e.to_string())?;
         if !guard.claim_event_tick(&tick_id).map_err(|e| e.to_string())? {
-            eprintln!("[event] duplicate tick ignored tick_id={}", tick_id);
+            eprintln!("[event] automatic tick already processed tick_id={}", tick_id);
             return guard.snapshot().map_err(|e| e.to_string());
         }
     }
@@ -316,7 +317,7 @@ async fn generate_event(app: tauri::AppHandle, engine: State<'_, Mutex<Engine>>,
             "recent_summaries_for_dedup_only": recent_summaries,
         "location_change_available": location_due,
     });
-    prompt = format!(
+    let prompt = format!(
         "Generate one concrete causal world event, then compare it with PREVIOUS TOP-LEVEL EVENT before deciding its relation. Return exactly one valid JSON object, with no Markdown or explanation. Required fields: event_type, summary, importance 0..1, location, effects, participants, causes, memory, relation (exactly continue/new/related/interrupt/resume), thread_id (string or null), title (string or null), estimated_duration (integer or null), progress (object or null with summary, progress 0..1, state planned/active/paused/completed/interrupted/failed/abandoned). The summary must mainly begin with “你……”, speak directly to the player like a character casually chatting about what happened today. Use simple, concrete, everyday Simplified Chinese, like a short chat message. Do not write literary, poetic, atmospheric or novel-like prose; avoid piling up adjectives, metaphors and abstract descriptions. Prefer concrete actions, ordinary objects, short reactions and natural complaints. Ordinary small events should usually be 1-2 sentences; events with meaningful content may naturally use 3-5 sentences. Do not repeat facts to fill space. Add light teasing, sarcasm, self-deprecation or small jokes only when it fits the character and situation. If the current event is the continuation, advancement, next step, or intermediate state of the previous event, MUST return relation continue and the previous thread id; it must become a child Progress, never a new top-level event. This applies even when the wording changes, as long as the same task/activity/story is still underway. Use new only when it is a separate instantaneous event or a genuinely new activity. Use related for a separate activity connected to the previous one, interrupt when the previous activity is stopped by this event, and resume when the interrupted activity starts again. A continuous activity must use estimated_duration 10..40. Progress updates must be meaningful and at least 5 minutes apart. For a manual event action, do not return no_event. Do not modify state directly. STATE: {}. PREVIOUS TOP-LEVEL EVENT: {}. ACTIVE EVENT THREADS: {}. MEMORY: {}. CHARACTER: {}. Current local time: {}. A location change opportunity is {}. If the opportunity is false, keep the current location exactly. If true, decide whether to move based on time, behavior, energy, mood, weather and known locations; if moving, choose a different known location and describe the travel.",
         serde_json::to_string(&snapshot).map_err(|e| e.to_string())?,
         serde_json::to_string(&previous_event).map_err(|e| e.to_string())?,
@@ -326,16 +327,16 @@ async fn generate_event(app: tauri::AppHandle, engine: State<'_, Mutex<Engine>>,
         snapshot.world_time,
         if location_due { "available" } else { "not available" }
     );
-    prompt = format!(
+    let mut _legacy_prompt = format!(
         "{}\nAdditional hard rules: plan each event thread to have 0 to 4 child progress updates based on its complexity. A simple event may have no progress updates. A complex activity may use 1, 2, 3 or at most 4 meaningful updates. Never create more than 4. The prompt includes the current update count: if there are already 3 updates, make the next update the final meaningful step and mark the thread completed; if there are 4, do not request another update and end the thread. If relation is continue/resume/interrupt and progress is not null, progress.summary must be the same complete conversational sentence quality as summary, not a shortened label. If the event introduces a new person/NPC, effects.npc is required and must be an object with camelCase fields: id, name, role, personality, favoriteItem, homeLocation, relationship, relationshipNote, avatar. role means occupation/job or social identity, such as 学生, 老师, 店员, 医生, 图书管理员, 插画师, 程序员, 研究员, 社团成员. Never use 朋友/friend as role; friendship belongs in relationshipNote and relationship score. personality means character traits. favoriteItem must be a concrete like/preference, not empty. relationship is the current 0..100 relationship score with the main character. relationshipNote explains how this person relates to the main character. If homeLocation is 家/Home, write it as NAME的家, for example zhaoran的家. Set avatar to an empty string; the app chooses a random transparent PNG avatar. If no new person is created, omit effects.npc or set it to null. For each five-dimensional attribute, sample a probability score from a normal distribution truncated to [0,1], centered at 0.5. A score near 0.5 means no change or a very small change; scores above 0.5 indicate a positive change and scores below 0.5 indicate a negative change. Use the exact local time, current behavior, energy, mood and event outcome to shift the distribution tendency: rest/success/enjoyable activities shift it upward, fatigue/failure/late-night strain shift it downward. The absolute delta must be derived from the distance from 0.5, rounded to one decimal, and remain within the normal-event limit of -1.0..1.0. Do not force every event to change an attribute.",
         prompt
     );
-    prompt = format!(
+    _legacy_prompt = format!(
         "{}\nDIRECTOR CONTEXT, highest priority: {}.\nGrounding rules: The event must clearly use at least two concrete facts from DIRECTOR CONTEXT, choosing from current_location, known_locations, inventory, relationships, configured_profile, current_behavior, stats, world premise, or active thread. The chosen location must match current_location unless location_change_available is true. If relationships are non-empty, about 20 percent of events should involve one existing NPC by name and use that NPC's role/personality/favoriteItem/relationshipNote. If inventory is non-empty, ordinary events should sometimes use an owned item. Do not default to rain, windows, books, reading, libraries, quiet sitting, or generic 'feeling calm' unless those are explicitly required by the current location, active thread, or configured character profile AND they were not already used in recent_summaries. MEMORY, PREVIOUS EVENT, ACTIVE THREADS, and recent summaries are format/threading/dedup references only. Their old content, locations, weather, people, items, actions and themes are unrelated to the next event unless the same active thread is explicitly continued. Never copy or remix old examples as event content. Generate content from DIRECTOR CONTEXT first: current location, current character profile, current world background, current NPCs, current inventory, current stats, and current time. Prefer actions that fit the current location's description and the character's configured interests/behavior. If you cannot find enough context, use the current location and one relationship or item before inventing anything.",
         prompt,
         serde_json::to_string(&director_context).map_err(|e| e.to_string())?
     );
-    let prompt = format!(
+    _legacy_prompt = format!(
         "{}\nWorld simulation policy: You are a continuously running world simulator, not a Q&A assistant. Known background, characters, locations, items, skills, memories and history are current known state and initial conditions, not the whole world and not the boundary of future development. Use them as references and constraints, while naturally advancing the world. You may create new low-impact details, rumors, minor conflicts, small discoveries, tasks, relationships, objects, places, organizations or secrets when they fit the world view, character personality and causal logic. Do not force expansion; most new content should be mundane and low-impact. Characters do not know the full truth and may guess, misunderstand, or be wrong. Events must have continuity and causality, but not every event needs plot. Think: if this world really exists, what is naturally happening now?\nEditable event probability policy loaded from world/event_probabilities.json: {}. Follow this probability file over any older probability text. Multi-event means one Event Thread with nested Progress, not multiple top-level events.",
         prompt,
         probability_policy
@@ -431,8 +432,10 @@ Rules: summary starts with “你” and sounds like casual daily chat, using si
     let raw = match llm::generate(config.clone(), prompt.clone()).await {
         Ok(raw) => raw,
         Err(error) => {
-            if let Ok(guard) = engine.lock() {
-                let _ = guard.release_event_tick(&tick_id);
+            if !is_manual {
+                if let Ok(guard) = engine.lock() {
+                    let _ = guard.release_event_tick(&tick_id);
+                }
             }
             return Err(error);
         }
@@ -594,12 +597,12 @@ fn planned_event_type(snapshot: &WorldSnapshot, location_due: bool) -> &'static 
         "social" => "social_event",
         "explore" => "discovery_event",
         "play" | "work" => "activity_event",
-        "observe" => "weather_event",
+        "observe" => "normal_event",
         _ => {
             let bucket = (chrono::Local::now().timestamp() / 600).unsigned_abs() % 20;
             match bucket {
                 0 => "item_event",
-                1 => "weather_event",
+                1 => "normal_event",
                 2 => "discovery_event",
                 _ => "normal_event",
             }
@@ -642,14 +645,82 @@ fn is_duplicate_summary(candidate: &str, recent: &[String]) -> bool {
 
 fn normalize_proposal_value(value: &mut Value) {
     let Some(object) = value.as_object_mut() else { return; };
+    if object.get("effects").is_some_and(|effects| effects.is_array() || effects.is_null()) {
+        object.insert("effects".into(), Value::Object(Map::new()));
+    }
     if let Some(Value::String(text)) = object.get("effects").cloned() {
         object.insert("effects".into(), parse_effect_text(&text));
+    }
+    if let Some(duration) = object.get("estimated_duration").cloned() {
+        if let Some(normalized) = normalize_duration(duration) {
+            object.insert("estimated_duration".into(), normalized);
+        }
+    }
+    for key in ["thread_id", "title"] {
+        if let Some(normalized) = normalize_optional_text(object.get(key).cloned()) {
+            object.insert(key.into(), normalized);
+        }
     }
     if let Some(Value::String(text)) = object.get("memory").cloned() {
         object.insert("memory".into(), Value::Bool(!text.trim().is_empty() && text != "false"));
     } else if object.get("memory").map(Value::is_null).unwrap_or(true) {
         object.insert("memory".into(), Value::Bool(false));
     }
+}
+
+fn normalize_optional_text(value: Option<Value>) -> Option<Value> {
+    match value? {
+        Value::Null => Some(Value::Null),
+        Value::String(text) => Some(Value::String(text)),
+        Value::Number(number) => Some(Value::String(number.to_string())),
+        Value::Bool(boolean) => Some(Value::String(boolean.to_string())),
+        other => Some(Value::String(other.to_string())),
+    }
+}
+
+fn normalize_duration(value: Value) -> Option<Value> {
+    match value {
+        Value::Null => Some(Value::Null),
+        Value::Number(number) => number.as_f64().map(|value| {
+            Value::Number(serde_json::Number::from(value.round().clamp(0.0, 40.0) as i64))
+        }),
+        Value::String(text) => {
+            let text = text.trim().to_ascii_lowercase();
+            if text.is_empty() || text == "null" || text == "none" {
+                return Some(Value::Null);
+            }
+            if let Ok(minutes) = text.parse::<f64>() {
+                return Some(serde_json::json!(minutes.round().clamp(0.0, 40.0) as i32));
+            }
+            let hours = text.contains("hour") || text.contains("小时") || text.contains("小時");
+            let half = text.contains("half") || text.contains("半");
+            let minutes = text.contains("minute") || text.contains("min") || text.contains("分钟") || text.contains("分鐘");
+            if hours {
+                let amount = extract_first_number(&text).unwrap_or(if half { 0.5 } else { 1.0 });
+                return Some(serde_json::json!((amount * 60.0).round().clamp(0.0, 40.0) as i32));
+            }
+            if minutes {
+                let amount = extract_first_number(&text).unwrap_or(10.0);
+                return Some(serde_json::json!(amount.round().clamp(0.0, 40.0) as i32));
+            }
+            Some(Value::Null)
+        }
+        _ => Some(Value::Null),
+    }
+}
+
+fn extract_first_number(text: &str) -> Option<f64> {
+    let mut number = String::new();
+    let mut seen_digit = false;
+    for character in text.chars() {
+        if character.is_ascii_digit() || (character == '.' && seen_digit) {
+            number.push(character);
+            seen_digit = true;
+        } else if seen_digit {
+            break;
+        }
+    }
+    number.parse::<f64>().ok()
 }
 
 fn parse_effect_text(text: &str) -> Value {

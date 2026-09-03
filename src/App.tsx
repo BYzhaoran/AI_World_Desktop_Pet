@@ -166,7 +166,7 @@ function Chronicle({ state, onAiGenerate }: { state: PetState; onAiGenerate: () 
       <div className="section-title">
         <div><span className="eyebrow">REAL-TIME MEMORY</span><h3>Chronicle</h3></div>
         <div className="chronicle-actions">
-          <button className="outline-action" onClick={onAiGenerate} title="AI 立即生成一个事件"><Sparkles size={14} />AI 立即生成</button>
+          <button className="outline-action" onClick={() => onAiGenerate()} title="AI 立即生成一个事件"><Sparkles size={14} />AI 立即生成</button>
         </div>
       </div>
       <div className="event-list">
@@ -576,7 +576,7 @@ export default function App() {
   }, [settings.spriteData, settings.spriteAtlasWidth, settings.spriteAtlasHeight, settings.spriteFrameWidth, settings.spriteFrameHeight, settings.spriteColumns, settings.spriteRows]);
   useEffect(() => { if (!isChronicleWindow) return; let unlisten: (() => void) | undefined; void listen('open-settings', () => setSettingsOpen(true)).then(stop => { unlisten = stop; }); return () => unlisten?.(); }, [isChronicleWindow]);
 
-  const generateAiEvent = async () => {
+  const generateAiEvent = async (manual = true) => {
     if (generatingRef.current) return;
     if (!settings.baseUrl.trim() || !settings.model.trim()) {
       const message = '请先填写 Base URL 和 Model';
@@ -595,6 +595,7 @@ export default function App() {
         characterContext: `World background: ${settings.worldBackground}\nName: ${settings.characterName}\nTags: ${settings.characterTags}\nInterests: ${settings.characterInterests}\nBehavior: ${settings.characterBehavior}\nStart location: ${settings.characterStartLocation}\nStats: energy=${settings.characterEnergy ?? state.energy}, mood=${settings.characterMood ?? state.mood}, health=${settings.characterHealth ?? state.health}, intelligence=${settings.characterIntelligence ?? state.intelligence}, curiosity=${settings.characterCuriosity ?? state.curiosity}, social=${settings.characterFriendship ?? state.friendship}, creativity=${settings.characterCreativity ?? state.creativity}, courage=${settings.characterCourage ?? state.courage}\nInitial items: ${settings.characterItems}\nInitial skills: ${settings.characterSkills}\nPersonality: ${settings.characterDescription}\nExperiences: ${settings.characterExperiences}`,
         restStart: settings.restStart,
         restEnd: settings.restEnd,
+        manual,
       });
       setState(updated);
       setSettings(current => ({ ...current, characterEnergy: updated.energy, characterMood: updated.mood, characterHealth: updated.health, characterIntelligence: updated.intelligence, characterFriendship: updated.friendship, characterCuriosity: updated.curiosity, characterCreativity: updated.creativity, characterCourage: updated.courage }));
@@ -610,7 +611,7 @@ export default function App() {
 
   useEffect(() => {
     if (!isChronicleWindow || !running) return;
-    const timer = window.setInterval(() => { void generateAiEvent(); }, 600000);
+    const timer = window.setInterval(() => { void generateAiEvent(false); }, 600000);
     return () => window.clearInterval(timer);
   }, [isChronicleWindow, running, settings.baseUrl, settings.model, settings.apiKey, settings.language, settings.worldBackground, settings.characterDescription, settings.characterExperiences]);
 
