@@ -2,11 +2,12 @@ export type EventType = 'normal_event' | 'social_event' | 'activity_event' | 'we
 export type PetMood = 'idle' | 'thinking' | 'happy' | 'sleepy' | 'social' | 'celebrating';
 export interface EventRecord { id: string; timestamp: string; type: EventType; summary: string; location: string; importance: number; participants: string[]; causes: string[]; }
 export type EventThreadStatus = 'planned' | 'active' | 'paused' | 'completed' | 'interrupted' | 'failed' | 'abandoned';
-export interface EventEffects { energy?: number; mood?: number; health?: number; intelligence?: number; friendship?: number; curiosity?: number; creativity?: number; courage?: number; money?: number; exploration?: number; xp?: number; item?: unknown; }
+export interface NpcEffect { id?: string; name: string; role: string; personality: string; favoriteItem: string; homeLocation: string; relationship: number; relationshipNote: string; avatar?: string; }
+export interface EventEffects { energy?: number; mood?: number; health?: number; intelligence?: number; friendship?: number; curiosity?: number; creativity?: number; courage?: number; money?: number; exploration?: number; xp?: number; item?: unknown; npc?: NpcEffect | null; }
 export interface EventProgress { id: string; threadId: string; timestamp: string; summary: string; progress: number; state: EventThreadStatus; effects?: EventEffects | null; }
 export interface EventThread { id: string; title: string; summary: string; type: EventType; startTime: string; lastUpdateTime: string; endTime: string | null; estimatedDuration: number; actualDuration: number | null; status: EventThreadStatus; progress: number; importance: number; location: string; participants: string[]; updates: EventProgress[]; }
 export interface Trait { name: string; score: number; color: string; }
-export interface Npc { id: string; name: string; role: string; relationship: number; stage: string; avatar: string; personality: string; favoriteItem: string; homeLocation: string; }
+export interface Npc { id: string; name: string; role: string; relationship: number; stage: string; avatar: string; personality: string; favoriteItem: string; homeLocation: string; relationshipNote: string; }
 export interface Location { name: string; description: string; exploration: number; rarity: string; }
 export interface WorldSnapshot extends PetState {
   worldTime: string;

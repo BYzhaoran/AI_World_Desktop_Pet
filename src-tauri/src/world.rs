@@ -11,7 +11,25 @@ const EVENT_TYPES: &[&str] = &[
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct RelationshipEffect { pub target: String, pub delta: i32 }
+pub struct RelationshipEffect {
+    pub target: String,
+    #[serde(default, deserialize_with = "number_to_i32")]
+    pub delta: i32,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct NpcEffect {
+    pub id: String,
+    pub name: String,
+    pub role: String,
+    pub personality: String,
+    pub favorite_item: String,
+    pub home_location: String,
+    pub relationship: f32,
+    pub relationship_note: String,
+    pub avatar: String,
+}
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -20,36 +38,70 @@ pub struct PersonalitySignal { pub trait_name: String, pub delta: i32, pub reaso
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct EventEffects {
+    #[serde(default, deserialize_with = "number_to_i32")]
     pub energy: i32,
-    #[serde(alias = "happiness")]
+    #[serde(default, alias = "happiness", deserialize_with = "number_to_i32")]
     pub mood: i32,
+    #[serde(default, deserialize_with = "number_to_i32")]
     pub xp: i32,
+    #[serde(default, deserialize_with = "number_to_i32")]
     pub health: i32,
     pub intelligence: f32,
     pub friendship: f32,
     pub curiosity: f32,
     pub creativity: f32,
     pub courage: f32,
+    #[serde(default, deserialize_with = "number_to_i32")]
     pub exploration: i32,
+    #[serde(default, deserialize_with = "number_to_i32")]
     pub money: i32,
     pub relationship: Option<RelationshipEffect>,
+    pub npc: Option<NpcEffect>,
     pub personality_signal: Option<PersonalitySignal>,
     pub item: Option<ItemEffect>,
     pub skill: Option<SkillEffect>,
     pub goal: Option<GoalEffect>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ItemEffect { pub id: String, pub name: String, pub description: String, pub quantity: i32 }
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct InitialWorldConfig {
+    pub name: String,
+    pub world_background: String,
+    pub character_description: String,
+    pub character_experiences: String,
+    pub character_tags: String,
+    pub character_interests: String,
+    pub character_behavior: String,
+    pub sprite_columns: i32,
+    pub sprite_rows: i32,
+    pub energy: i32,
+    pub mood: i32,
+    pub health: i32,
+    pub intelligence: f32,
+    pub friendship: f32,
+    pub curiosity: f32,
+    pub creativity: f32,
+    pub courage: f32,
+    pub location: String,
+    pub items: Vec<String>,
+    pub inventory: Vec<InventoryItem>,
+    pub skills: Vec<String>,
+    pub locations: Vec<Location>,
+    pub npc: Option<NpcEffect>,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SkillEffect { pub id: String, pub name: String, pub experience: i32 }
+pub struct ItemEffect { pub id: String, pub name: String, pub description: String, #[serde(default, deserialize_with = "number_to_i32")] pub quantity: i32 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct GoalEffect { pub id: String, pub progress: i32 }
+pub struct SkillEffect { pub id: String, pub name: String, #[serde(default, deserialize_with = "number_to_i32")] pub experience: i32 }
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GoalEffect { pub id: String, #[serde(default, deserialize_with = "number_to_i32")] pub progress: i32 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -168,7 +220,7 @@ pub struct Goal { pub name: String, pub progress: i32, pub target: i32 }
 pub struct Npc {
     pub id: String, pub name: String, pub role: String, pub relationship: i32,
     pub stage: String, pub avatar: String, pub personality: String,
-    pub favorite_item: String, pub home_location: String,
+    pub favorite_item: String, pub home_location: String, pub relationship_note: String,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -198,6 +250,7 @@ impl Engine {
         let _ = self.db.execute("ALTER TABLE npcs ADD COLUMN personality TEXT NOT NULL DEFAULT ''", []);
         let _ = self.db.execute("ALTER TABLE npcs ADD COLUMN favorite_item TEXT NOT NULL DEFAULT ''", []);
         let _ = self.db.execute("ALTER TABLE npcs ADD COLUMN home_location TEXT NOT NULL DEFAULT ''", []);
+        let _ = self.db.execute("ALTER TABLE npcs ADD COLUMN relationship_note TEXT NOT NULL DEFAULT ''", []);
         self.db.execute("DELETE FROM relationships WHERE npc_id IN ('aoi','yuki','ren')", [])?;
         self.db.execute("DELETE FROM npcs WHERE id IN ('aoi','yuki','ren')", [])?;
         Ok(())
@@ -228,7 +281,8 @@ impl Engine {
         let tx = self.db.transaction()?;
         Self::set(&tx, "rest_start", start.clamp(0, 23))?;
         Self::set(&tx, "rest_end", end.clamp(0, 23))?;
-        tx.commit()
+        tx.commit()?;
+        self.close_sleep_threads_outside_rest(Local::now()).map(|_| ())
     }
     pub fn in_rest_period(&self, now: DateTime<Local>) -> bool {
         let start = self.number("rest_start", 22).clamp(0, 23) as u32;
@@ -237,13 +291,28 @@ impl Engine {
         if start == end { true } else if start < end { hour >= start && hour < end } else { hour >= start || hour < end }
     }
 
+    pub fn close_sleep_threads_outside_rest(&mut self, now: DateTime<Local>) -> rusqlite::Result<usize> {
+        if self.in_rest_period(now) {
+            return Ok(0);
+        }
+        let timestamp = now.to_rfc3339();
+        let closed = self.db.execute(
+            "UPDATE event_threads SET status='completed', progress=1.0, end_time=?1, last_update_time=?1, actual_duration=estimated_duration WHERE id LIKE 'sleep-%' AND status IN ('planned','active','paused')",
+            params![timestamp],
+        )?;
+        if closed > 0 {
+            eprintln!("[event] closed {} sleep thread(s) outside configured rest period", closed);
+        }
+        Ok(closed)
+    }
+
     pub fn snapshot(&self) -> rusqlite::Result<WorldSnapshot> {
         let now = Local::now();
         let events = self.events()?;
         let event_threads = self.event_threads()?;
         let important_today = events.iter().filter(|e| e.event_type == "important_event" && e.timestamp.starts_with(&now.format("%Y-%m-%d").to_string())).count() as i32;
         let traits = { let mut stmt=self.db.prepare("SELECT name,score,color FROM personality_traits ORDER BY rowid")?; let rows=stmt.query_map([], |r| Ok(Trait{name:r.get(0)?,score:r.get(1)?,color:r.get(2)?}))?; rows.collect::<Result<Vec<_>,_>>()? };
-        let npcs = { let mut stmt=self.db.prepare("SELECT n.id,n.name,n.role,COALESCE(r.score,0),COALESCE(r.stage,'acquaintance'),n.avatar,n.personality,n.favorite_item,n.home_location FROM npcs n LEFT JOIN relationships r ON r.npc_id=n.id ORDER BY n.rowid")?; let rows=stmt.query_map([], |r| Ok(Npc{id:r.get(0)?,name:r.get(1)?,role:r.get(2)?,relationship:r.get(3)?,stage:r.get(4)?,avatar:r.get(5)?,personality:r.get(6)?,favorite_item:r.get(7)?,home_location:r.get(8)?}))?; rows.collect::<Result<Vec<_>,_>>()? };
+        let npcs = { let mut stmt=self.db.prepare("SELECT n.id,n.name,n.role,COALESCE(r.score,0),COALESCE(r.stage,'acquaintance'),n.avatar,n.personality,n.favorite_item,n.home_location,n.relationship_note FROM npcs n LEFT JOIN relationships r ON r.npc_id=n.id ORDER BY n.rowid")?; let rows=stmt.query_map([], |r| Ok(Npc{id:r.get(0)?,name:r.get(1)?,role:r.get(2)?,relationship:r.get(3)?,stage:r.get(4)?,avatar:r.get(5)?,personality:r.get(6)?,favorite_item:r.get(7)?,home_location:r.get(8)?,relationship_note:r.get(9)?}))?; rows.collect::<Result<Vec<_>,_>>()? };
         let next = self.value("next_normal_check")?.and_then(|v| v.parse().ok());
         let memories = {
             let mut stmt = self.db.prepare("SELECT summary FROM memories ORDER BY created_at DESC LIMIT 50")?;
@@ -288,6 +357,22 @@ impl Engine {
         workspace_root()
             .or_else(|| self.root.parent().map(PathBuf::from))
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+    }
+
+    fn random_npc_avatar(&self, seed: u64) -> Option<String> {
+        let dir = self.project_root().join("icons_split");
+        let mut files = fs::read_dir(dir).ok()?
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().and_then(|value| value.to_str()).is_some_and(|ext| ext.eq_ignore_ascii_case("png")))
+            .collect::<Vec<_>>();
+        if files.is_empty() {
+            return None;
+        }
+        files.sort();
+        let path = files.get((seed as usize) % files.len())?;
+        let bytes = fs::read(path).ok()?;
+        Some(format!("data:image/png;base64,{}", base64_encode(&bytes)))
     }
 
     pub fn memory_context(&self) -> String {
@@ -355,6 +440,7 @@ impl Engine {
             self.simulate_elapsed(now, elapsed)?;
         }
         self.enforce_location_schedule(Local::now())?;
+        self.close_sleep_threads_outside_rest(Local::now())?;
         let now = Local::now().timestamp();
         if let Some(kind) = self.run_time_constraints(Local::now())? {
             return Ok(Some(kind));
@@ -588,7 +674,10 @@ impl Engine {
         Ok((delta_energy, delta_mood, delta_health, delta_xp, delta_friendship))
     }
 
+    #[allow(unreachable_code)]
     fn generate_npc(&mut self, timestamp: i64, seed: u64) -> rusqlite::Result<()> {
+        eprintln!("[event] skipped fallback npc generation timestamp={} seed={}; npc profiles require AI effects.npc", timestamp, seed);
+        return Ok(());
         let names = ["Mika", "Sora", "Nia", "Kaito", "Lena", "Tomo"];
         let roles = ["面包师", "园丁", "修理师", "研究员", "旅行者", "音乐教师"];
         let personalities = ["温和而细心", "好奇健谈", "安静可靠", "热情直接", "谨慎聪明"];
@@ -599,9 +688,11 @@ impl Engine {
         let personality = personalities[(seed as usize / 7) % personalities.len()];
         let location = self.value("location")?.unwrap_or_else(|| "Home".into());
         let favorite = ["书签", "热茶", "齿轮", "画笔", "星图"][(seed as usize / 11) % 5];
+        let avatar = self.random_npc_avatar(seed).unwrap_or_else(|| name.chars().next().unwrap_or('N').to_string());
+        let relationship_note = format!("{} met the main character at {} and is still getting familiar.", name, location);
         let tx = self.db.transaction()?;
-        tx.execute("INSERT OR IGNORE INTO npcs(id,name,role,avatar,personality,favorite_item,home_location) VALUES (?1,?2,?3,?4,?5,?6,?7)",
-            params![id, name, role, name.chars().next().unwrap_or('N').to_string(), personality, favorite, location])?;
+        tx.execute("INSERT OR IGNORE INTO npcs(id,name,role,avatar,personality,favorite_item,home_location,relationship_note) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+            params![id, name, role, avatar, personality, favorite, location, relationship_note])?;
         tx.execute("INSERT OR IGNORE INTO relationships(npc_id,score,stage) VALUES (?1,?2,'acquaintance')",
             params![id, (seed % 21) as i32])?;
         tx.execute("INSERT OR IGNORE INTO events(id,timestamp,type,summary,importance,location,causes,participants) VALUES (?1,?2,'relationship_event',?3,0.72,?4,'[]',?5)",
@@ -628,25 +719,100 @@ impl Engine {
     }
 
     pub fn reset(&mut self) -> rusqlite::Result<()> {
+        self.reset_with_config(None)
+    }
+
+    pub fn initialize(&mut self, config: InitialWorldConfig) -> rusqlite::Result<WorldSnapshot> {
+        self.reset_with_config(Some(config))?;
+        self.snapshot()
+    }
+
+    pub fn apply_initial_assets(&mut self, config: &InitialWorldConfig) -> rusqlite::Result<WorldSnapshot> {
+        let seed = Local::now().timestamp_nanos_opt().unwrap_or_default().unsigned_abs();
+        let locations = config.locations.iter()
+            .filter(|location| !location.name.trim().is_empty())
+            .take(4)
+            .cloned()
+            .collect::<Vec<_>>();
+        let inventory = config.inventory.iter()
+            .filter(|item| !item.name.trim().is_empty())
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut npc = config.npc.clone().unwrap_or_else(|| NpcEffect {
+            id: "zhaoran".into(),
+            name: "zhaoran".into(),
+            role: "学生".into(),
+            personality: "熟人面前比较放松，偶尔会吐槽主角想太多".into(),
+            favorite_item: "书包和奶茶".into(),
+            home_location: "zhaoran的家".into(),
+            relationship: 10.0,
+            relationship_note: "初始朋友，和主角比较熟，会参与早期日常事件。".into(),
+            avatar: String::new(),
+        });
+        npc.id = "zhaoran".into();
+        npc.name = "zhaoran".into();
+        npc.role = npc_role(&npc.role, seed);
+        npc.home_location = npc_home_location("zhaoran", &npc.home_location);
+        if npc.personality.trim().is_empty() { npc.personality = "熟人面前比较放松，偶尔会吐槽主角想太多".into(); }
+        if npc.favorite_item.trim().is_empty() { npc.favorite_item = "书包和奶茶".into(); }
+        if npc.relationship_note.trim().is_empty() { npc.relationship_note = "初始朋友，和主角比较熟，会参与早期日常事件。".into(); }
+        if npc.avatar.trim().is_empty() { npc.avatar = self.random_npc_avatar(seed).unwrap_or_else(|| "Z".into()); }
+        let relationship = npc.relationship.round().clamp(0.0, 100.0) as i32;
+        let stage = relationship_stage(relationship);
+        let tx = self.db.transaction()?;
+        if !locations.is_empty() {
+            Self::set(&tx, "known_locations", serde_json::to_string(&locations).unwrap())?;
+            let current = if config.location.trim().is_empty() { &locations[0].name } else { &config.location };
+            Self::set(&tx, "location", current)?;
+        }
+        if !inventory.is_empty() {
+            Self::set(&tx, "inventory", serde_json::to_string(&inventory).unwrap())?;
+        }
+        tx.execute("DELETE FROM relationships WHERE npc_id='zhaoran'", [])?;
+        tx.execute("DELETE FROM npcs WHERE id='zhaoran'", [])?;
+        tx.execute("INSERT INTO npcs(id,name,role,avatar,personality,favorite_item,home_location,relationship_note) VALUES ('zhaoran','zhaoran',?1,?2,?3,?4,?5,?6)",
+            params![npc.role, npc.avatar, npc.personality, npc.favorite_item, npc.home_location, npc.relationship_note])?;
+        tx.execute("INSERT INTO relationships(npc_id,score,stage) VALUES ('zhaoran',?1,?2)", params![relationship, stage])?;
+        tx.commit()?;
+        self.sync_markdown("initial-ai-assets")?;
+        self.snapshot()
+    }
+
+    fn reset_with_config(&mut self, config: Option<InitialWorldConfig>) -> rusqlite::Result<()> {
         self.db.execute_batch("DELETE FROM world_state; DELETE FROM events; DELETE FROM event_progress; DELETE FROM event_threads; DELETE FROM personality_evidence; DELETE FROM relationships; DELETE FROM shared_experiences; DELETE FROM memories; DELETE FROM inventory; DELETE FROM skills; DELETE FROM goals; DELETE FROM personality_traits; DELETE FROM npcs; DELETE FROM characters; DELETE FROM important_people;")?;
         self.seed_defaults()?;
         let locations = r#"[{"name":"家","description":"可以休息和整理物品的地方。","exploration":0,"rarity":"common"},{"name":"学校","description":"学习、完成任务和认识新朋友的地方。","exploration":0,"rarity":"common"},{"name":"便利店","description":"可以买到日常用品和简单食物。","exploration":0,"rarity":"common"},{"name":"公园","description":"适合散步、玩耍和观察环境。","exploration":0,"rarity":"common"},{"name":"街道","description":"连接各个地点的日常道路。","exploration":0,"rarity":"common"}]"#;
-        let names = ["小雨", "晴", "阿岚", "小夏", "星野"];
         let seed = Local::now().timestamp_nanos_opt().unwrap_or_default().unsigned_abs() as usize;
-        let name = names[seed % names.len()];
-        let location = ["家", "学校", "便利店", "公园", "街道"][seed % 5];
-        let npc_id = format!("npc-initial-{}", seed);
+        let location = config.as_ref().map(|value| value.location.trim()).filter(|value| !value.is_empty()).unwrap_or(["家", "学校", "便利店", "公园", "街道"][seed % 5]);
+        let character_name = config.as_ref().map(|value| value.name.trim()).filter(|value| !value.is_empty()).unwrap_or("Aoi");
+        let energy = config.as_ref().map(|value| value.energy.clamp(0, 100)).unwrap_or(100);
+        let mood = config.as_ref().map(|value| value.mood.clamp(0, 100)).unwrap_or(100);
+        let health = config.as_ref().map(|value| value.health.clamp(0, 100)).unwrap_or(100);
+        let intelligence = config.as_ref().map(|value| value.intelligence.clamp(0.0, 100.0)).unwrap_or(10.0);
+        let friendship = config.as_ref().map(|value| value.friendship.clamp(0.0, 100.0)).unwrap_or(10.0);
+        let curiosity = config.as_ref().map(|value| value.curiosity.clamp(0.0, 100.0)).unwrap_or(10.0);
+        let creativity = config.as_ref().map(|value| value.creativity.clamp(0.0, 100.0)).unwrap_or(10.0);
+        let courage = config.as_ref().map(|value| value.courage.clamp(0.0, 100.0)).unwrap_or(10.0);
+        let items = config.as_ref().map(|value| value.items.clone()).filter(|items| !items.is_empty()).unwrap_or_else(|| vec!["书包".into()]);
+        let skills = config.as_ref().map(|value| value.skills.clone()).unwrap_or_default();
+        let zhaoran_role = "\u{5b66}\u{751f}";
+        let zhaoran_avatar = self.random_npc_avatar(seed as u64).unwrap_or_else(|| "Z".into());
+        let zhaoran_home = npc_home_location("zhaoran", location);
+        let zhaoran_personality = "\u{719f}\u{4eba}\u{9762}\u{524d}\u{6bd4}\u{8f83}\u{653e}\u{677e}\u{ff0c}\u{5076}\u{5c14}\u{4f1a}\u{5410}\u{69fd}\u{4e3b}\u{89d2}\u{60f3}\u{592a}\u{591a}";
+        let zhaoran_favorite = "\u{4e66}\u{5305}\u{548c}\u{5976}\u{8336}";
+        let zhaoran_note = "\u{521d}\u{59cb}\u{670b}\u{53cb}\u{ff0c}\u{548c}\u{4e3b}\u{89d2}\u{6bd4}\u{8f83}\u{719f}\u{ff0c}\u{4f1a}\u{53c2}\u{4e0e}\u{65e9}\u{671f}\u{65e5}\u{5e38}\u{4e8b}\u{4ef6}\u{3002}";
         let tx = self.db.transaction()?;
-        for (key, value) in [("energy", "100"), ("mood", "100"), ("health", "100"), ("intelligence", "10"), ("friendship", "10"), ("curiosity", "10"), ("creativity", "10"), ("courage", "10"), ("location", location), ("current_behavior", "idle"), ("day_count", "1"), ("total_play_time", "0"), ("last_update", &Local::now().to_rfc3339()), ("next_normal_check", &(Local::now().timestamp() + 600).to_string())] {
+        for (key, value) in [("name", character_name), ("energy", &energy.to_string()), ("mood", &mood.to_string()), ("health", &health.to_string()), ("intelligence", &format!("{:.1}", intelligence)), ("friendship", &format!("{:.1}", friendship)), ("curiosity", &format!("{:.1}", curiosity)), ("creativity", &format!("{:.1}", creativity)), ("courage", &format!("{:.1}", courage)), ("location", location), ("current_behavior", "idle"), ("day_count", "1"), ("total_play_time", "0"), ("last_update", &Local::now().to_rfc3339()), ("next_normal_check", &(Local::now().timestamp() + 600).to_string())] {
             Self::set(&tx, key, value)?;
         }
         Self::set(&tx, "known_locations", locations)?;
-        Self::set(&tx, "inventory", r#"[{"name":"书包","detail":"一个可以装下日常物品的书包。","icon":"backpack"}]"#)?;
-        Self::set(&tx, "skills", "[]")?;
-        tx.execute("INSERT INTO npcs(id,name,role,avatar,personality,favorite_item,home_location) VALUES (?1,?2,'朋友',?3,'友善、愿意一起探索','书签',?4)",
-            params![npc_id, name, name.chars().next().unwrap_or('友').to_string(), location])?;
-        tx.execute("INSERT INTO relationships(npc_id,score,stage) VALUES (?1,10,'friend')", params![npc_id])?;
-        tx.execute("INSERT INTO inventory(id,name,quantity,description) VALUES ('backpack','书包',1,'一个可以装下日常物品的书包。')", [])?;
+        let inventory: Vec<InventoryItem> = items.iter().filter(|item| !item.trim().is_empty()).map(|item| InventoryItem { name: item.trim().into(), detail: "初始物品".into(), icon: "backpack".into() }).collect();
+        let skills: Vec<Skill> = skills.iter().filter(|skill| !skill.trim().is_empty()).map(|skill| Skill { name: skill.trim().into(), level: 1, xp: 0 }).collect();
+        Self::set(&tx, "inventory", serde_json::to_string(&inventory).unwrap())?;
+        Self::set(&tx, "skills", serde_json::to_string(&skills).unwrap())?;
+        tx.execute("INSERT INTO npcs(id,name,role,avatar,personality,favorite_item,home_location,relationship_note) VALUES ('zhaoran','zhaoran',?1,?2,?3,?4,?5,?6)",
+            params![zhaoran_role, zhaoran_avatar, zhaoran_personality, zhaoran_favorite, zhaoran_home, zhaoran_note])?;
+        tx.execute("INSERT INTO relationships(npc_id,score,stage) VALUES ('zhaoran',10,'friend')", [])?;
         tx.commit()
     }
 
@@ -699,6 +865,32 @@ impl Engine {
         let id=format!("event-{}",now.timestamp_millis()); let rel=p.relationship().map(|r|(r.target.clone(),r.delta.clamp(-5,5))); let display_summary = format!("{}{}{}", p.summary.trim(), effects_suffix(&normalized_effects), reward_suffix);
         let item_effect=p.effects.item.clone(); let skill_effect=p.effects.skill.clone(); let goal_effect=p.effects.goal.clone();
         let personality_signal=p.effects.personality_signal.clone();
+        let npc_effect = p.effects.npc.clone().map(|mut npc| {
+            let seed = now.timestamp_millis().unsigned_abs();
+            if npc.name.trim().is_empty() {
+                npc.name = format!("NPC {}", seed % 1000);
+            }
+            if npc.id.trim().is_empty() {
+                npc.id = make_npc_id(&npc.name, seed);
+            }
+            npc.role = npc_role(&npc.role, seed);
+            if npc.personality.trim().is_empty() {
+                npc.personality = "还不太熟，性格有待观察".into();
+            }
+            if npc.favorite_item.trim().is_empty() {
+                npc.favorite_item = "日常小物".into();
+            }
+            let home_location = if npc.home_location.trim().is_empty() { p.location.as_str() } else { npc.home_location.as_str() };
+            npc.home_location = npc_home_location(&npc.name, home_location);
+            if npc.relationship_note.trim().is_empty() {
+                npc.relationship_note = format!("{} 是最近认识的人，和主角的关系还在发展中。", npc.name);
+            }
+            if npc.avatar.trim().is_empty() {
+                npc.avatar = self.random_npc_avatar(seed).unwrap_or_else(|| npc.name.chars().next().unwrap_or('N').to_string());
+            }
+            npc.relationship = npc.relationship.clamp(0.0, 100.0);
+            npc
+        });
         let mut items: Vec<InventoryItem> = self.json("inventory", vec![]);
         let mut skills: Vec<Skill> = self.json("skills", vec![]);
         let mut goals: Vec<Goal> = self.json("goals", vec![]);
@@ -756,8 +948,9 @@ impl Engine {
                 let progress = if finishing_update { 1.0 } else { p.progress.as_ref().map(|value| value.progress.clamp(0.0, 1.0)).unwrap_or(if status == "completed" { 1.0 } else { 0.0 }) };
                 if let Some(update) = update {
                     let progress_id = format!("progress-{}", now.timestamp_millis());
+                    let progress_summary = if p.progress.is_some() { p.summary.trim() } else { update.summary.trim() };
                     tx.execute("INSERT INTO event_progress(id,thread_id,timestamp,summary,progress,state,effects) VALUES (?1,?2,?3,?4,?5,?6,?7)", params![
-                        progress_id, &thread_id, now.to_rfc3339(), update.summary.trim(),
+                        progress_id, &thread_id, now.to_rfc3339(), progress_summary,
                         update.progress.clamp(0.0, 1.0), status, serde_json::to_string(&normalized_effects).unwrap()
                     ])?;
                 }
@@ -774,6 +967,14 @@ impl Engine {
             tx.execute("INSERT INTO events(id,timestamp,type,summary,importance,location,causes,participants) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",params![&id,now.to_rfc3339(),&p.event_type,&display_summary,p.importance.clamp(0.0,1.0),&p.location,serde_json::to_string(&p.causes).unwrap(),serde_json::to_string(&p.participants).unwrap()])?;
         }
         Self::set(&tx,"xp",total)?; Self::set(&tx,"level",level)?; Self::set(&tx,"next_xp",next)?; Self::set(&tx,"mood",mood)?; Self::set(&tx,"energy",energy)?; Self::set(&tx,"health",health)?; Self::set(&tx,"intelligence",format!("{:.1}",intelligence))?; Self::set(&tx,"friendship",format!("{:.1}",friendship))?; Self::set(&tx,"curiosity",format!("{:.1}",curiosity))?; Self::set(&tx,"creativity",format!("{:.1}",creativity))?; Self::set(&tx,"courage",format!("{:.1}",courage))?; Self::set(&tx,"money",money)?; Self::set(&tx,"location",&p.location)?; if p.location != old_location { Self::set(&tx,"last_location_change",now.timestamp())?; } Self::set(&tx,"last_update",now.to_rfc3339())?; Self::set(&tx,"next_normal_check",now.timestamp()+1800)?;
+        if let Some(npc)=npc_effect {
+            let relationship = npc.relationship.round() as i32;
+            let stage = relationship_stage(relationship);
+            tx.execute("INSERT INTO npcs(id,name,role,avatar,personality,favorite_item,home_location,relationship_note) VALUES (?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(id) DO UPDATE SET name=excluded.name,role=excluded.role,avatar=excluded.avatar,personality=excluded.personality,favorite_item=excluded.favorite_item,home_location=excluded.home_location,relationship_note=excluded.relationship_note",
+                params![&npc.id, &npc.name, &npc.role, &npc.avatar, &npc.personality, &npc.favorite_item, &npc.home_location, &npc.relationship_note])?;
+            tx.execute("INSERT INTO relationships(npc_id,score,stage) VALUES (?1,?2,?3) ON CONFLICT(npc_id) DO UPDATE SET score=excluded.score,stage=excluded.stage",
+                params![&npc.id, relationship, stage])?;
+        }
         if let Some((target,delta))=rel {
             let score: i32 = tx.query_row("SELECT score FROM relationships WHERE npc_id=?1", params![target], |row| row.get(0)).optional()?.unwrap_or(0);
             let updated = (score + delta).clamp(0, 100);
@@ -848,14 +1049,90 @@ impl Engine {
         fs::write(character_dir.join("personality.md"), personality).map_err(|_| rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other("failed to write personality.md"))))?;
 
         let npcs = {
-            let mut stmt = self.db.prepare("SELECT n.name,COALESCE(r.score,0),COALESCE(r.stage,'acquaintance') FROM npcs n LEFT JOIN relationships r ON r.npc_id=n.id ORDER BY n.rowid")?;
-            let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i32>(1)?, r.get::<_, String>(2)?)))?; rows.collect::<Result<Vec<_>, _>>()?
+            let mut stmt = self.db.prepare("SELECT n.name,COALESCE(r.score,0),COALESCE(r.stage,'acquaintance'),n.role,n.personality,n.favorite_item,n.home_location,n.relationship_note FROM npcs n LEFT JOIN relationships r ON r.npc_id=n.id ORDER BY n.rowid")?;
+            let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i32>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?, r.get::<_, String>(4)?, r.get::<_, String>(5)?, r.get::<_, String>(6)?, r.get::<_, String>(7)?)))?; rows.collect::<Result<Vec<_>, _>>()?
         };
         let mut relationships = String::from("# Relationships\n\n");
-        for (name, score, stage) in npcs { relationships.push_str(&format!("## {}\n- Stage: {}\n- Score: {}/100\n\n", name, stage, score)); }
+        for (name, score, stage, role, personality, favorite, home, note) in npcs {
+            relationships.push_str(&format!("## {}\n- Role: {}\n- Stage: {}\n- Score: {}/100\n- Personality: {}\n- Favorite: {}\n- Home: {}\n- Relationship: {}\n\n", name, role, stage, score, personality, favorite, home, note));
+        }
         fs::write(character_dir.join("relationships.md"), relationships).map_err(|_| rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other("failed to write relationships.md"))))?;
         Ok(())
     }
+}
+
+fn make_npc_id(name: &str, seed: u64) -> String {
+    let ascii = name.chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .collect::<String>()
+        .to_ascii_lowercase();
+    if ascii.is_empty() {
+        format!("npc-{}", seed)
+    } else {
+        format!("npc-{}-{}", ascii, seed % 100000)
+    }
+}
+
+fn npc_role(candidate: &str, seed: u64) -> String {
+    let trimmed = candidate.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    let invalid = trimmed.is_empty()
+        || trimmed == "\u{670b}\u{53cb}"
+        || lower == "friend"
+        || lower == "close_friend"
+        || lower == "acquaintance"
+        || lower == "trusted";
+    if !invalid {
+        return trimmed.to_string();
+    }
+    let roles = [
+        "\u{5b66}\u{751f}",
+        "\u{8001}\u{5e08}",
+        "\u{5e97}\u{5458}",
+        "\u{533b}\u{751f}",
+        "\u{56fe}\u{4e66}\u{7ba1}\u{7406}\u{5458}",
+        "\u{63d2}\u{753b}\u{5e08}",
+        "\u{7a0b}\u{5e8f}\u{5458}",
+        "\u{7814}\u{7a76}\u{5458}",
+        "\u{793e}\u{56e2}\u{6210}\u{5458}",
+        "\u{4fbf}\u{5229}\u{5e97}\u{5e97}\u{5458}",
+    ];
+    roles[(seed as usize) % roles.len()].into()
+}
+
+fn npc_home_location(name: &str, location: &str) -> String {
+    let trimmed = location.trim();
+    if trimmed.is_empty() {
+        return format!("{}\u{7684}\u{5bb6}", name.trim());
+    }
+    if trimmed == "\u{5bb6}" || trimmed.eq_ignore_ascii_case("home") {
+        format!("{}\u{7684}\u{5bb6}", name.trim())
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn base64_encode(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0];
+        let b1 = *chunk.get(1).unwrap_or(&0);
+        let b2 = *chunk.get(2).unwrap_or(&0);
+        out.push(TABLE[(b0 >> 2) as usize] as char);
+        out.push(TABLE[(((b0 & 0b0000_0011) << 4) | (b1 >> 4)) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(TABLE[(((b1 & 0b0000_1111) << 2) | (b2 >> 6)) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(TABLE[(b2 & 0b0011_1111) as usize] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
 }
 
 fn unit(seed: u64) -> f32 {
@@ -934,6 +1211,26 @@ fn relationship_stage(score: i32) -> &'static str {
     }
 }
 
+fn number_to_i32<'de, D>(deserializer: D) -> Result<i32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    match value {
+        serde_json::Value::Number(number) => number
+            .as_f64()
+            .map(|value| value.round() as i32)
+            .ok_or_else(|| serde::de::Error::custom("invalid number")),
+        serde_json::Value::String(text) => text
+            .trim()
+            .parse::<f64>()
+            .map(|value| value.round() as i32)
+            .map_err(serde::de::Error::custom),
+        serde_json::Value::Null => Ok(0),
+        _ => Err(serde::de::Error::custom("expected numeric value")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -950,6 +1247,27 @@ mod tests {
     #[test]
     fn default_proposal_is_no_event() {
         assert_eq!(EventProposal::default().event_type, "no_event");
+    }
+
+    #[test]
+    fn integer_effects_accept_floating_point_json() {
+        let proposal: EventProposal = serde_json::from_str(r#"{
+            "event_type":"normal_event",
+            "summary":"你坐在窗边翻开书，雨声听着很舒服，心里安静下来。",
+            "importance":0.2,
+            "location":"家",
+            "effects":{"energy":0.2,"mood":"1.6","health":-0.6,"xp":2.4,"exploration":0.2,"money":0.0,"relationship":{"target":"zhaoran","delta":0.6}},
+            "participants":["main"],
+            "causes":[],
+            "memory":false
+        }"#).unwrap();
+        assert_eq!(proposal.effects.energy, 0);
+        assert_eq!(proposal.effects.mood, 2);
+        assert_eq!(proposal.effects.health, -1);
+        assert_eq!(proposal.effects.xp, 2);
+        assert_eq!(proposal.effects.exploration, 0);
+        assert_eq!(proposal.effects.money, 0);
+        assert_eq!(proposal.effects.relationship.unwrap().delta, 1);
     }
 
     #[test]
@@ -1056,6 +1374,25 @@ mod tests {
     }
 
     #[test]
+    fn explicit_progress_uses_full_event_summary() {
+        let mut engine = engine();
+        let first = engine.apply(EventProposal {
+            event_type: "activity_event".into(), summary: "start".into(), importance: 0.2,
+            location: "home".into(), estimated_duration: Some(20),
+            participants: vec!["main".into()], ..Default::default()
+        }).unwrap();
+        let thread_id = first.event_threads[0].id.clone();
+        let full = "full progress sentence with more detail";
+        let snapshot = engine.apply(EventProposal {
+            event_type: "activity_event".into(), summary: full.into(), importance: 0.12,
+            location: "home".into(), relation: Some("continue".into()), thread_id: Some(thread_id),
+            progress: Some(ProgressUpdate { summary: "short".into(), progress: 0.3, state: Some("active".into()) }),
+            participants: vec!["main".into()], ..Default::default()
+        }).unwrap();
+        assert_eq!(snapshot.event_threads[0].updates[0].summary, full);
+    }
+
+    #[test]
     fn rest_period_forces_location_home() {
         let mut engine = engine();
         let tx = engine.db.transaction().unwrap();
@@ -1083,6 +1420,20 @@ mod tests {
     }
 
     #[test]
+    fn sleep_thread_is_closed_outside_rest_period() {
+        let mut engine = engine();
+        let now = Local.with_ymd_and_hms(2026, 9, 4, 12, 0, 0).unwrap();
+        let tx = engine.db.transaction().unwrap();
+        Engine::set(&tx, "rest_start", 22).unwrap();
+        Engine::set(&tx, "rest_end", 8).unwrap();
+        tx.execute("INSERT INTO event_threads(id,title,summary,type,start_time,last_update_time,end_time,estimated_duration,actual_duration,status,progress,importance,location,participants) VALUES ('sleep-2026-09-04','sleep','sleep','activity_event',?1,?1,NULL,10,NULL,'active',0.4,0.1,'家','[\"main\"]')", params![now.to_rfc3339()]).unwrap();
+        tx.commit().unwrap();
+        assert_eq!(engine.close_sleep_threads_outside_rest(now).unwrap(), 1);
+        let status: String = engine.db.query_row("SELECT status FROM event_threads WHERE id='sleep-2026-09-04'", [], |row| row.get(0)).unwrap();
+        assert_eq!(status, "completed");
+    }
+
+    #[test]
     fn relationship_updates_stage() {
         let mut engine = engine();
         engine.db.execute("INSERT INTO npcs(id,name,role,avatar) VALUES ('yuki','Yuki','traveler','Y')", []).unwrap();
@@ -1094,6 +1445,74 @@ mod tests {
         }).unwrap();
         assert_eq!(snapshot.npcs.iter().find(|npc| npc.id == "yuki").unwrap().relationship, 23);
         assert_eq!(snapshot.npcs.iter().find(|npc| npc.id == "yuki").unwrap().stage, "friend");
+    }
+
+    #[test]
+    fn npc_effect_creates_expandable_relationship_profile() {
+        let mut engine = engine();
+        let snapshot = engine.apply(EventProposal {
+            event_type: "relationship_event".into(),
+            summary: "你在公园认识了一个新朋友，对方说话挺直接，但人不坏。".into(),
+            importance: 0.5,
+            location: "公园".into(),
+            effects: EventEffects {
+                npc: Some(NpcEffect {
+                    id: "lin".into(),
+                    name: "Lin".into(),
+                    role: "插画师".into(),
+                    personality: "直接、细心、有点毒舌".into(),
+                    favorite_item: "速写本".into(),
+                    home_location: "公园".into(),
+                    relationship: 24.0,
+                    relationship_note: "在公园认识的新朋友，会聊画画和日常小事。".into(),
+                    avatar: "L".into(),
+                }),
+                ..Default::default()
+            },
+            participants: vec!["main".into(), "lin".into()],
+            causes: vec![],
+            memory: true,
+            ..Default::default()
+        }).unwrap();
+        let npc = snapshot.npcs.iter().find(|npc| npc.id == "lin").unwrap();
+        assert_eq!(npc.role, "插画师");
+        assert_eq!(npc.favorite_item, "速写本");
+        assert_eq!(npc.relationship, 24);
+        assert_eq!(npc.stage, "friend");
+        assert!(npc.relationship_note.contains("公园"));
+    }
+
+    #[test]
+    fn npc_profile_sanitizes_role_and_home_location() {
+        let mut engine = engine();
+        let snapshot = engine.apply(EventProposal {
+            event_type: "relationship_event".into(),
+            summary: "你在家门口碰见一个新认识的人，对方顺手帮你拿了一下东西。".into(),
+            importance: 0.5,
+            location: "家".into(),
+            effects: EventEffects {
+                npc: Some(NpcEffect {
+                    id: "momo".into(),
+                    name: "Momo".into(),
+                    role: "朋友".into(),
+                    personality: "热心，话有点多".into(),
+                    favorite_item: "便利店饭团".into(),
+                    home_location: "家".into(),
+                    relationship: 18.4,
+                    relationship_note: "刚认识不久，但已经能自然聊天。".into(),
+                    avatar: "M".into(),
+                }),
+                ..Default::default()
+            },
+            participants: vec!["main".into(), "momo".into()],
+            causes: vec![],
+            memory: true,
+            ..Default::default()
+        }).unwrap();
+        let npc = snapshot.npcs.iter().find(|npc| npc.id == "momo").unwrap();
+        assert_ne!(npc.role, "朋友");
+        assert_eq!(npc.home_location, "Momo的家");
+        assert_eq!(npc.relationship, 18);
     }
 }
 
@@ -1109,5 +1528,10 @@ fn dirs_path() -> PathBuf {
     std::env::var_os("AI_WORLD_DATA")
         .map(PathBuf::from)
         .or_else(|| workspace_root().map(|root| root.join(".aoi-data")))
+        .or_else(|| {
+            std::env::current_exe()
+                .ok()
+                .and_then(|path| path.parent().map(|parent| parent.join("data")))
+        })
         .unwrap_or_else(|| std::env::temp_dir().join("aoi-world-data"))
 }

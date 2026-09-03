@@ -17,6 +17,8 @@ type SettingsState = {
   sidebarEvents: number;
   fps: number;
   realTime: boolean;
+  onboardingComplete: boolean;
+  worldBackground: string;
   characterDescription: string;
   characterExperiences: string;
   characterTags: string;
@@ -46,7 +48,8 @@ type SettingsState = {
 };
 type LogEntry = { time: string; level: 'info' | 'error'; message: string };
 type ResizeDirection = 'East' | 'North' | 'NorthEast' | 'NorthWest' | 'South' | 'SouthEast' | 'SouthWest' | 'West';
-type SettingsTab = 'provider' | 'character' | 'sprite' | 'runtime' | 'reset';
+type SettingsTab = 'provider' | 'world' | 'character' | 'sprite' | 'task' | 'runtime' | 'reset';
+type SpriteUpdate = { data: string; atlasWidth: number; atlasHeight: number; frameWidth: number; frameHeight: number; columns: number; rows: number };
 
 function appendLog(level: LogEntry['level'], message: string) {
   const entry = { time: new Date().toISOString(), level, message };
@@ -128,7 +131,8 @@ function PetStage({
   onResize: (direction: ResizeDirection, event: MouseEvent<HTMLSpanElement>) => void;
 }) {
   const drag = () => { void getCurrentWindow().startDragging().catch(() => undefined); };
-  const frameRect = spriteUrl ? frameFor({ width: atlasSize.width, height: atlasSize.height, columns: spriteGrid.columns, rows: spriteGrid.rows }, frame) : undefined;
+  const maxFrame = Math.max(0, spriteGrid.columns * spriteGrid.rows - 1);
+  const frameRect = spriteUrl ? frameFor({ width: atlasSize.width, height: atlasSize.height, columns: spriteGrid.columns, rows: spriteGrid.rows }, Math.max(0, Math.min(maxFrame, frame))) : undefined;
   const style = spriteUrl && frameRect ? {
     width: frameRect.width,
     height: frameRect.height,
@@ -174,7 +178,45 @@ function Chronicle({ state, onAiGenerate }: { state: PetState; onAiGenerate: () 
 }
 
 function RelationshipsView({ state }: { state: PetState }) {
-  return <section className="detail-view"><div className="section-title"><div><span className="eyebrow">SOCIAL GRAPH</span><h3>人际</h3></div></div><div className="detail-list">{state.npcs.map(npc => <article className="detail-row" key={npc.id}><div className="person-avatar">{npc.avatar}</div><div><strong>{npc.name}</strong><span>{npc.role}</span></div><b className="detail-score"><Heart size={13} /> {npc.relationship}</b></article>)}</div></section>;
+  const [openId, setOpenId] = useState<string | null>(state.npcs[0]?.id ?? null);
+  return (
+    <section className="detail-view">
+      <div className="section-title"><div><span className="eyebrow">SOCIAL GRAPH</span><h3>人际</h3></div></div>
+      <div className="detail-list npc-list">
+        {state.npcs.map(npc => {
+          const open = openId === npc.id;
+          const avatarIsImage = npc.avatar.startsWith('data:image') || npc.avatar.endsWith('.png');
+          return (
+            <article className={`npc-card ${open ? 'open' : ''}`} key={npc.id}>
+              <button className="npc-summary" onClick={() => setOpenId(open ? null : npc.id)}>
+                <div className="person-avatar">
+                  {avatarIsImage ? <img src={npc.avatar} alt={npc.name} /> : npc.avatar}
+                </div>
+                <div>
+                  <strong>{npc.name}</strong>
+                  <span>{npc.role || '未知职业'}</span>
+                </div>
+                <b className="detail-score"><Heart size={13} /> {npc.relationship}</b>
+                <ChevronRight className="npc-chevron" size={14} />
+              </button>
+              {open && (
+                <div className="npc-detail">
+                  <p>{npc.relationshipNote || '还没有记录这段关系的细节。'}</p>
+                  <div className="npc-fields">
+                    <span><b>职业</b>{npc.role || '未知'}</span>
+                    <span><b>性格</b>{npc.personality || '还不太熟'}</span>
+                    <span><b>喜好</b>{npc.favoriteItem || '未知'}</span>
+                    <span><b>常驻</b>{npc.homeLocation || state.location}</span>
+                    <span><b>关系</b>{npc.stage || 'acquaintance'}</span>
+                  </div>
+                </div>
+              )}
+            </article>
+          );
+        })}
+      </div>
+    </section>
+  );
 }
 
 function PersonalityView({ state }: { state: PetState }) {
@@ -218,7 +260,6 @@ function CharacterView({ state, settings, onChange, spriteUrl, atlasSize, onFram
       <label>背景故事 / 角色简介<textarea value={settings.characterExperiences} onChange={event => update({ characterExperiences: event.target.value })} /></label>
       <label>初始物品<input value={settings.characterItems} onChange={event => update({ characterItems: event.target.value })} placeholder="笔记本, 雨伞" /></label>
       <label>初始技能<input value={settings.characterSkills} onChange={event => update({ characterSkills: event.target.value })} placeholder="阅读, 绘画" /></label>
-      <div className="settings-grid"><label>休息开始（小时）<input type="number" min="0" max="23" value={settings.restStart} onChange={event => update({ restStart: Math.max(0, Math.min(23, Number(event.target.value))) })} /></label><label>休息结束（小时）<input type="number" min="0" max="23" value={settings.restEnd} onChange={event => update({ restEnd: Math.max(0, Math.min(23, Number(event.target.value))) })} /></label></div>
       <label>头像帧<input type="number" min="0" max={settings.spriteColumns * settings.spriteRows - 1} value={settings.characterAvatarFrame} onChange={event => { const frame = Math.max(0, Number(event.target.value)); update({ characterAvatarFrame: frame }); onFrameChange(frame); }} /></label>
     </div>}
     <div className="xp-panel"><div><strong>XP 经验</strong><b>{state.xp} / {state.nextXp}</b></div><Progress value={state.nextXp > 0 ? state.xp / state.nextXp * 100 : 0} color="#c18a34" /></div><div className="profile-dimensions"><strong>五维成长属性</strong><div className="profile-grid">{[['智力', state.intelligence], ['好奇心', state.curiosity], ['社交', state.friendship], ['创造力', state.creativity], ['勇气', state.courage]].map(([label, value]) => <div className="profile-stat" key={String(label)}><span>{label}</span><b>{value}</b><Progress value={Number(value)} /></div>)}</div></div>
@@ -236,10 +277,11 @@ function MapView({ state }: { state: PetState }) {
   </section>;
 }
 
-function SettingsPanel({ settings, onChange, onClose, onTest, onExport, onReset, onSprite, onLogs }: {
+function SettingsPanel({ settings, onChange, onClose, onSave, onTest, onExport, onReset, onSprite, onLogs }: {
   settings: SettingsState;
   onChange: (next: SettingsState) => void;
   onClose: () => void;
+  onSave: () => void;
   onTest: () => void;
   onExport: () => void;
   onReset: () => void;
@@ -253,7 +295,7 @@ function SettingsPanel({ settings, onChange, onClose, onTest, onExport, onReset,
       <section className="settings-panel" onMouseDown={event => event.stopPropagation()}>
         <header><div><span className="eyebrow">WORLD CONFIGURATION</span><h2>Settings</h2></div><button className="icon-button" onClick={onClose}><X size={18} /></button></header>
         <nav className="settings-tabs">
-          {([['provider', 'API / Model'], ['character', 'Character'], ['sprite', 'Sprite / Animation'], ['runtime', 'Runtime'], ['reset', 'Reset']] as const).map(([key, label]) => <button key={key} className={tab === key ? 'active' : ''} onClick={() => setTab(key)}>{label}</button>)}
+          {([['provider', 'API / Model'], ['world', 'World'], ['character', 'Character'], ['sprite', 'Sprite / Animation'], ['task', 'Task'], ['runtime', 'Runtime'], ['reset', 'Reset']] as const).map(([key, label]) => <button key={key} className={tab === key ? 'active' : ''} onClick={() => setTab(key)}>{label}</button>)}
         </nav>
         {tab === 'provider' && <>
           <label>Base URL<input value={settings.baseUrl} onChange={event => update({ baseUrl: event.target.value })} placeholder="https://example.com/v1" /></label>
@@ -261,6 +303,9 @@ function SettingsPanel({ settings, onChange, onClose, onTest, onExport, onReset,
           <label>API Key<input type="password" value={settings.apiKey} onChange={event => update({ apiKey: event.target.value })} /></label>
           <label>Output language<select value={settings.language} onChange={event => update({ language: event.target.value as 'zh' | 'en' })}><option value="zh">中文优先</option><option value="en">English</option></select></label>
           <div className="settings-actions settings-page-actions"><button className="outline-action" onClick={onTest}><RefreshCw size={14} /> TEST CONNECTION</button></div>
+        </>}
+        {tab === 'world' && <>
+          <label>World background<textarea value={settings.worldBackground} onChange={event => update({ worldBackground: event.target.value })} placeholder="Describe the persistent world, rules, tone, locations and long-term premise." /></label>
         </>}
         {tab === 'character' && <>
           <label>Character name<input value={settings.characterName} onChange={event => update({ characterName: event.target.value })} placeholder="Character name" /></label>
@@ -270,20 +315,27 @@ function SettingsPanel({ settings, onChange, onClose, onTest, onExport, onReset,
         {tab === 'sprite' && <>
           <label className="settings-section-title">Sprite sheet</label>
           <div className="settings-grid">
-            <label>Columns<select value={settings.spriteColumns} onChange={event => { const columns = Number(event.target.value); update({ spriteColumns: columns, spriteFrameWidth: settings.spriteAtlasWidth / columns }); }}><option value="8">8 columns</option><option value="10">10 columns</option></select></label>
+            <label>Columns<select value={settings.spriteColumns} onChange={event => { const columns = Number(event.target.value); update({ spriteColumns: columns, spriteFrameWidth: settings.spriteAtlasWidth / columns }); }}><option value="8">8 columns</option><option value="10">10 columns</option><option value="12">12 columns</option></select></label>
             <label>Rows<select value={settings.spriteRows} onChange={event => { const rows = Number(event.target.value); update({ spriteRows: rows, spriteFrameHeight: settings.spriteAtlasHeight / rows }); }}><option value="9">9 rows</option><option value="10">10 rows</option></select></label>
           </div>
           <label className="outline-action sprite-picker">IMPORT PNG SPRITE<input hidden type="file" accept="image/png" onChange={event => event.target.files?.[0] && onSprite(event.target.files[0])} /></label>
           <label>Animation FPS<input type="number" min="0.5" max="10" step="0.5" value={settings.fps} onChange={event => update({ fps: Number(event.target.value) })} /></label>
+        </>}
+        {tab === 'task' && <>
+          <label className="settings-section-title">Rest schedule</label>
+          <div className="settings-grid">
+            <label>Rest start hour<input type="number" min="0" max="23" value={settings.restStart} onChange={event => update({ restStart: Math.max(0, Math.min(23, Number(event.target.value))) })} /></label>
+            <label>Rest end hour<input type="number" min="0" max="23" value={settings.restEnd} onChange={event => update({ restEnd: Math.max(0, Math.min(23, Number(event.target.value))) })} /></label>
+          </div>
         </>}
         {tab === 'runtime' && <>
           <label>Chronicle events<select value={settings.sidebarEvents} onChange={event => update({ sidebarEvents: Number(event.target.value) })}><option value="5">5</option><option value="8">8</option><option value="10">10</option><option value="20">20</option></select></label>
           <label className="check-row"><input type="checkbox" checked={settings.realTime} onChange={event => update({ realTime: event.target.checked })} /> Real-time mode</label>
           <div className="settings-actions settings-page-actions"><button className="outline-action" onClick={onLogs}>OPEN LOGS</button><button className="outline-action" onClick={onExport}><Download size={14} /> EXPORT</button></div>
         </>}
-        {tab === 'reset' && <div className="reset-page"><h3>Reset Character World</h3><p>Restore the initial character, five starting locations, one friend, one backpack and an empty event history. API, model and key settings remain unchanged.</p><button className="primary-action reset-button" onClick={onReset}><RefreshCw size={14} /> RESET CHARACTER WORLD</button></div>}
+        {tab === 'reset' && <div className="reset-page"><h3>Reset Character World</h3><p>Reopen initialization and regenerate the starting item, four base locations and zhaoran with AI. API, model and key settings remain unchanged.</p><button className="primary-action reset-button" onClick={onReset}><RefreshCw size={14} /> REOPEN INITIALIZATION</button></div>}
         <div className="settings-actions">
-          <button className="primary-action" onClick={onClose}>SAVE</button>
+          <button className="primary-action" onClick={onSave}>SAVE</button>
         </div>
       </section>
     </div>
@@ -296,15 +348,93 @@ function LogsPanel({ close }: { close: () => void }) {
   return <div className="modal-backdrop" onMouseDown={close}><section className="settings-panel log-panel" onMouseDown={event => event.stopPropagation()}><header><div><span className="eyebrow">DIAGNOSTICS</span><h2>Logs</h2></div><button className="icon-button" onClick={close}><X size={18} /></button></header><div className="log-list">{logs.slice().reverse().map((entry, index) => <div className={`log-entry ${entry.level}`} key={`${entry.time}-${index}`}><time>{entry.time}</time><p>{entry.message}</p></div>)}</div><div className="settings-actions"><button className="text-action" onClick={clear}>CLEAR</button><button className="primary-action" onClick={close}>CLOSE</button></div></section></div>;
 }
 
+function OnboardingPanel({ settings, onChange, onSprite, onDone, busy, progress }: { settings: SettingsState; onChange: (next: SettingsState) => void; onSprite: (file: File) => void; onDone: () => void; busy: boolean; progress: number }) {
+  const [step, setStep] = useState(0);
+  const update = (patch: Partial<SettingsState>) => onChange({ ...settings, ...patch });
+  const steps = ['API', '世界', '人物', '属性', '形象'] as const;
+  const stepReady = [
+    Boolean(settings.baseUrl.trim() && settings.model.trim() && settings.apiKey.trim()),
+    Boolean(settings.worldBackground.trim()),
+    Boolean(settings.characterName.trim() && settings.characterDescription.trim() && settings.characterExperiences.trim() && settings.characterTags.trim()),
+    Boolean(settings.characterStartLocation.trim()),
+    Boolean(settings.spriteData),
+  ];
+  const ready = stepReady.every(Boolean);
+  const next = () => setStep(value => Math.min(steps.length - 1, value + 1));
+  const previous = () => setStep(value => Math.max(0, value - 1));
+  return (
+    <section className="onboarding-panel">
+      <header>
+        <span className="eyebrow">FIRST START</span>
+        <h2>The You Beyond</h2>
+        <p>按顺序建立世界、人物、初始属性和桌宠形象。之后的事件、记忆和行动判断都会参考这些设定。</p>
+      </header>
+      <nav className="onboarding-steps">
+        {steps.map((label, index) => <button key={label} className={step === index ? 'active' : stepReady[index] ? 'done' : ''} onClick={() => setStep(index)}>{index + 1}. {label}</button>)}
+      </nav>
+      {step === 0 && <div className="onboarding-page">
+        <label>Base URL<input value={settings.baseUrl} onChange={event => update({ baseUrl: event.target.value })} placeholder="https://example.com/v1" /></label>
+        <label>Model<input value={settings.model} onChange={event => update({ model: event.target.value })} placeholder="your-model" /></label>
+        <label>API Key<input type="password" value={settings.apiKey} onChange={event => update({ apiKey: event.target.value })} /></label>
+        <label>Output language<select value={settings.language} onChange={event => update({ language: event.target.value as 'zh' | 'en' })}><option value="zh">中文优先</option><option value="en">English</option></select></label>
+      </div>}
+      {step === 1 && <div className="onboarding-page">
+        <label>世界背景<textarea value={settings.worldBackground} onChange={event => update({ worldBackground: event.target.value })} placeholder="这个世界是什么样的？有什么规则、氛围、基础地点、长期目标或禁忌？" /></label>
+      </div>}
+      {step === 2 && <div className="onboarding-page">
+        <div className="settings-grid">
+          <label>角色名称<input value={settings.characterName} onChange={event => update({ characterName: event.target.value })} placeholder="例如：你、某个角色名" /></label>
+          <label>性格标签<input value={settings.characterTags} onChange={event => update({ characterTags: event.target.value })} placeholder="好奇, 毒舌, 慢热" /></label>
+        </div>
+        <label>性格描述<textarea value={settings.characterDescription} onChange={event => update({ characterDescription: event.target.value })} placeholder="说话方式、习惯、优点、缺点、会在意什么。" /></label>
+        <label>经历 / 背景故事<textarea value={settings.characterExperiences} onChange={event => update({ characterExperiences: event.target.value })} placeholder="过去经历、重要关系、当前处境、想完成的事。" /></label>
+        <div className="settings-grid">
+          <label>兴趣与喜好<textarea value={settings.characterInterests} onChange={event => update({ characterInterests: event.target.value })} placeholder="喜欢什么、讨厌什么、常做什么。" /></label>
+          <label>行为倾向<textarea value={settings.characterBehavior} onChange={event => update({ characterBehavior: event.target.value })} placeholder="更偏探索、学习、社交、创作还是休息。" /></label>
+        </div>
+      </div>}
+      {step === 3 && <div className="onboarding-page">
+        <div className="settings-grid onboarding-stats">
+          {[
+            ['characterEnergy', '能量', 100], ['characterMood', '心情', 100], ['characterHealth', '体力', 100],
+            ['characterIntelligence', '智力', 10], ['characterCuriosity', '好奇心', 10], ['characterFriendship', '社交', 10],
+            ['characterCreativity', '创造力', 10], ['characterCourage', '勇气', 10],
+          ].map(([key, label, fallback]) => <label key={String(key)}>{label}<input type="number" min="0" max="100" value={(settings[key as keyof SettingsState] as number | undefined) ?? fallback} onChange={event => update({ [key]: Number(event.target.value) } as Partial<SettingsState>)} /></label>)}
+        </div>
+        <div className="settings-grid">
+          <label>初始地点<input value={settings.characterStartLocation} onChange={event => update({ characterStartLocation: event.target.value })} placeholder="家" /></label>
+          <label>初始物品<input value={settings.characterItems} onChange={event => update({ characterItems: event.target.value })} placeholder="书包" /></label>
+        </div>
+        <label>初始技能<input value={settings.characterSkills} onChange={event => update({ characterSkills: event.target.value })} placeholder="阅读, 绘画" /></label>
+      </div>}
+      {step === 4 && <div className="onboarding-page">
+        <div className="settings-grid">
+          <label>精灵图列数<select value={settings.spriteColumns} onChange={event => { const columns = Number(event.target.value); update({ spriteColumns: columns, spriteFrameWidth: settings.spriteAtlasWidth / columns }); }}><option value="8">8 columns</option><option value="10">10 columns</option><option value="12">12 columns</option></select></label>
+          <label>精灵图行数<select value={settings.spriteRows} onChange={event => { const rows = Number(event.target.value); update({ spriteRows: rows, spriteFrameHeight: settings.spriteAtlasHeight / rows }); }}><option value="9">9 rows</option><option value="10">10 rows</option></select></label>
+        </div>
+        <label className={`outline-action sprite-picker ${settings.spriteData ? 'ready' : ''}`}>{settings.spriteData ? 'SPRITE IMPORTED' : 'IMPORT PNG SPRITE'}<input hidden type="file" accept="image/png" onChange={event => event.target.files?.[0] && onSprite(event.target.files[0])} /></label>
+      </div>}
+      <div className="settings-actions">
+        {busy && <div className="onboarding-progress"><span style={{ width: `${progress}%` }} /></div>}
+        {!ready && <span className="onboarding-hint">完成 API、世界、人物、属性和形象后才能开始。</span>}
+        {step > 0 && <button className="outline-action" disabled={busy} onClick={previous}>BACK</button>}
+        {step < steps.length - 1 ? <button className="primary-action" disabled={busy || !stepReady[step]} onClick={next}>NEXT</button> : <button className="primary-action" disabled={busy || !ready} onClick={onDone}>{busy ? 'GENERATING' : 'START'}</button>}
+      </div>
+    </section>
+  );
+}
+
 export default function App() {
   const [state, setState] = useState<PetState>(() => { try { return JSON.parse(localStorage.getItem('aoi-world-state') || 'null') || initialState; } catch { return initialState; } });
-  const [settings, setSettings] = useState<SettingsState>(() => { try { return { baseUrl: '', model: '', language: 'zh', characterName: initialState.name, sidebarEvents: 8, fps: 8, realTime: true, apiKey: '', characterDescription: '', characterExperiences: '', characterTags: '好奇, 温柔', characterInterests: '', characterBehavior: '', characterStartLocation: initialState.location, characterItems: '', characterSkills: '', characterAvatarFrame: 0, restStart: 22, restEnd: 8, characterHealth: 100, characterIntelligence: 50, characterFriendship: 0, characterCuriosity: 50, spriteColumns: 8, spriteRows: 9, spriteData: '', spriteAtlasWidth: 768, spriteAtlasHeight: 936, spriteFrameWidth: 96, spriteFrameHeight: 104, ...JSON.parse(localStorage.getItem('aoi-world-settings') || '{}') }; } catch { return { baseUrl: '', model: '', apiKey: '', language: 'zh', characterName: initialState.name, sidebarEvents: 8, fps: 8, realTime: true, characterDescription: '', characterExperiences: '', characterTags: '好奇, 温柔', characterInterests: '', characterBehavior: '', characterStartLocation: initialState.location, characterItems: '', characterSkills: '', characterAvatarFrame: 0, restStart: 22, restEnd: 8, characterHealth: 100, characterIntelligence: 50, characterFriendship: 0, characterCuriosity: 50, spriteColumns: 8, spriteRows: 9, spriteData: '', spriteAtlasWidth: 768, spriteAtlasHeight: 936, spriteFrameWidth: 96, spriteFrameHeight: 104 }; } });
+  const [settings, setSettings] = useState<SettingsState>(() => { try { return { baseUrl: '', model: '', language: 'zh', characterName: initialState.name, sidebarEvents: 8, fps: 8, realTime: true, onboardingComplete: false, worldBackground: '', apiKey: '', characterDescription: '', characterExperiences: '', characterTags: '好奇, 温柔', characterInterests: '', characterBehavior: '', characterStartLocation: initialState.location, characterItems: '', characterSkills: '', characterAvatarFrame: 0, restStart: 22, restEnd: 8, characterHealth: 100, characterIntelligence: 50, characterFriendship: 0, characterCuriosity: 50, characterCreativity: 50, characterCourage: 50, spriteColumns: 8, spriteRows: 9, spriteData: '', spriteAtlasWidth: 768, spriteAtlasHeight: 936, spriteFrameWidth: 96, spriteFrameHeight: 104, ...JSON.parse(localStorage.getItem('aoi-world-settings') || '{}') }; } catch { return { baseUrl: '', model: '', apiKey: '', language: 'zh', characterName: initialState.name, sidebarEvents: 8, fps: 8, realTime: true, onboardingComplete: false, worldBackground: '', characterDescription: '', characterExperiences: '', characterTags: '好奇, 温柔', characterInterests: '', characterBehavior: '', characterStartLocation: initialState.location, characterItems: '', characterSkills: '', characterAvatarFrame: 0, restStart: 22, restEnd: 8, characterHealth: 100, characterIntelligence: 50, characterFriendship: 0, characterCuriosity: 50, characterCreativity: 50, characterCourage: 50, spriteColumns: 8, spriteRows: 9, spriteData: '', spriteAtlasWidth: 768, spriteAtlasHeight: 936, spriteFrameWidth: 96, spriteFrameHeight: 104 }; } });
   const [running, setRunning] = useState(true);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [logsOpen, setLogsOpen] = useState(false);
   const [toast, setToast] = useState('');
   const [spriteUrl, setSpriteUrl] = useState(() => { try { return JSON.parse(localStorage.getItem('aoi-world-settings') || '{}').spriteData || ''; } catch { return ''; } });
   const [spriteFrame, setSpriteFrame] = useState(0);
+  const [initializing, setInitializing] = useState(false);
+  const [initialProgress, setInitialProgress] = useState(0);
   const animationRef = useRef(new AnimationController(animationsForGrid(settings.spriteColumns, settings.spriteRows)));
   const generatingRef = useRef(false);
   const [chronicleView, setChronicleView] = useState<'事件' | '人际' | '人物' | '地图' | '物品' | '设置'>('事件');
@@ -334,7 +464,7 @@ export default function App() {
       try {
         const snapshot = await invoke<WorldSnapshot>('get_world');
         setState(current => ({ ...snapshot, name: settings.characterName.trim() || current.name || snapshot.name }));
-        setSettings(current => ({ ...current, characterEnergy: snapshot.energy, characterMood: snapshot.mood, characterHealth: snapshot.health, characterIntelligence: snapshot.intelligence, characterFriendship: snapshot.friendship, characterCuriosity: snapshot.curiosity, characterCreativity: snapshot.creativity, characterCourage: snapshot.courage }));
+        setSettings(current => current.onboardingComplete ? ({ ...current, characterEnergy: snapshot.energy, characterMood: snapshot.mood, characterHealth: snapshot.health, characterIntelligence: snapshot.intelligence, characterFriendship: snapshot.friendship, characterCuriosity: snapshot.curiosity, characterCreativity: snapshot.creativity, characterCourage: snapshot.courage }) : current);
         appendLog('info', 'backend connected');
         unlisten = await listen<WorldSnapshot>('world-updated', event => {
           appendLog('info', `world-updated events=${event.payload.events.length}`);
@@ -371,7 +501,42 @@ export default function App() {
     frameId = requestAnimationFrame(animate);
     return () => cancelAnimationFrame(frameId);
   }, [spriteUrl, running, settings.fps, settings.spriteColumns, settings.spriteRows, state.animation]);
-  useEffect(() => { let unlisten: (() => void) | undefined; void listen<{ data: string }>('sprite-updated', event => { setSpriteUrl(event.payload.data); setSpriteFrame(0); }).then(stop => { unlisten = stop; }); return () => unlisten?.(); }, []);
+  useEffect(() => {
+    if (settings.spriteData && settings.spriteData !== spriteUrl) {
+      setSpriteUrl(settings.spriteData);
+      setSpriteFrame(0);
+    }
+  }, [settings.spriteData, spriteUrl]);
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void listen<SpriteUpdate>('sprite-updated', event => {
+      setSpriteUrl(event.payload.data);
+      setSpriteFrame(0);
+      setSettings(current => ({
+        ...current,
+        spriteData: event.payload.data,
+        spriteColumns: event.payload.columns,
+        spriteRows: event.payload.rows,
+        spriteAtlasWidth: event.payload.atlasWidth,
+        spriteAtlasHeight: event.payload.atlasHeight,
+        spriteFrameWidth: event.payload.frameWidth,
+        spriteFrameHeight: event.payload.frameHeight,
+      }));
+    }).then(stop => { unlisten = stop; });
+    return () => unlisten?.();
+  }, []);
+  useEffect(() => {
+    if (!settings.spriteData) return;
+    void emit('sprite-updated', {
+      data: settings.spriteData,
+      atlasWidth: settings.spriteAtlasWidth,
+      atlasHeight: settings.spriteAtlasHeight,
+      frameWidth: settings.spriteFrameWidth,
+      frameHeight: settings.spriteFrameHeight,
+      columns: settings.spriteColumns,
+      rows: settings.spriteRows,
+    });
+  }, [settings.spriteData, settings.spriteAtlasWidth, settings.spriteAtlasHeight, settings.spriteFrameWidth, settings.spriteFrameHeight, settings.spriteColumns, settings.spriteRows]);
   useEffect(() => { if (!isChronicleWindow) return; let unlisten: (() => void) | undefined; void listen('open-settings', () => setSettingsOpen(true)).then(stop => { unlisten = stop; }); return () => unlisten?.(); }, [isChronicleWindow]);
 
   const generateAiEvent = async () => {
@@ -390,7 +555,7 @@ export default function App() {
         model: settings.model,
         apiKey: settings.apiKey || null,
         language: settings.language,
-        characterContext: `Name: ${settings.characterName}\nTags: ${settings.characterTags}\nInterests: ${settings.characterInterests}\nBehavior: ${settings.characterBehavior}\nStart location: ${settings.characterStartLocation}\nStats: energy=${settings.characterEnergy ?? state.energy}, mood=${settings.characterMood ?? state.mood}, health=${settings.characterHealth ?? state.health}, intelligence=${settings.characterIntelligence ?? state.intelligence}, curiosity=${settings.characterCuriosity ?? state.curiosity}, social=${settings.characterFriendship ?? state.friendship}, creativity=${settings.characterCreativity ?? state.creativity}, courage=${settings.characterCourage ?? state.courage}\nInitial items: ${settings.characterItems}\nInitial skills: ${settings.characterSkills}\nPersonality: ${settings.characterDescription}\nExperiences: ${settings.characterExperiences}`,
+        characterContext: `World background: ${settings.worldBackground}\nName: ${settings.characterName}\nTags: ${settings.characterTags}\nInterests: ${settings.characterInterests}\nBehavior: ${settings.characterBehavior}\nStart location: ${settings.characterStartLocation}\nStats: energy=${settings.characterEnergy ?? state.energy}, mood=${settings.characterMood ?? state.mood}, health=${settings.characterHealth ?? state.health}, intelligence=${settings.characterIntelligence ?? state.intelligence}, curiosity=${settings.characterCuriosity ?? state.curiosity}, social=${settings.characterFriendship ?? state.friendship}, creativity=${settings.characterCreativity ?? state.creativity}, courage=${settings.characterCourage ?? state.courage}\nInitial items: ${settings.characterItems}\nInitial skills: ${settings.characterSkills}\nPersonality: ${settings.characterDescription}\nExperiences: ${settings.characterExperiences}`,
         restStart: settings.restStart,
         restEnd: settings.restEnd,
       });
@@ -410,50 +575,48 @@ export default function App() {
     if (!isChronicleWindow || !running) return;
     const timer = window.setInterval(() => { void generateAiEvent(); }, 600000);
     return () => window.clearInterval(timer);
-  }, [isChronicleWindow, running, settings.baseUrl, settings.model, settings.apiKey, settings.language, settings.characterDescription, settings.characterExperiences]);
+  }, [isChronicleWindow, running, settings.baseUrl, settings.model, settings.apiKey, settings.language, settings.worldBackground, settings.characterDescription, settings.characterExperiences]);
 
-  useEffect(() => {
-    if (!running) return;
-    void invoke('set_rest_hours', { start: settings.restStart, end: settings.restEnd }).catch(error => {
-      appendLog('error', `save rest hours failed: ${String(error)}`);
+  const applySpriteSettings = () => {
+    if (!settings.spriteData) return;
+    const columns = Math.max(1, Number(settings.spriteColumns) || 1);
+    const rows = Math.max(1, Number(settings.spriteRows) || 1);
+    const frameWidth = settings.spriteAtlasWidth / columns;
+    const frameHeight = settings.spriteAtlasHeight / rows;
+    setSpriteUrl(settings.spriteData);
+    setSpriteFrame(0);
+    animationRef.current = new AnimationController(animationsForGrid(columns, rows));
+    void emit('sprite-updated', {
+      data: settings.spriteData,
+      atlasWidth: settings.spriteAtlasWidth,
+      atlasHeight: settings.spriteAtlasHeight,
+      frameWidth,
+      frameHeight,
+      columns,
+      rows,
     });
-  }, [running, settings.restStart, settings.restEnd]);
+  };
+
+  const saveSettings = async (afterSave?: () => void) => {
+    try {
+      applySpriteSettings();
+      const snapshot = await invoke<WorldSnapshot>('set_rest_hours', { start: settings.restStart, end: settings.restEnd });
+      setState(snapshot);
+      notify('Settings saved');
+      afterSave?.();
+    } catch (error) {
+      appendLog('error', `save settings failed: ${String(error)}`);
+      notify('Save failed');
+    }
+  };
 
   const resetWorld = async () => {
-    if (!window.confirm('Reset the character world? API, model and key settings will be kept.')) return;
-    try {
-      await invoke('reset_world');
-      const snapshot = await invoke<WorldSnapshot>('get_world');
-      setState(snapshot);
-      setSpriteUrl('');
-      setSpriteFrame(0);
-      setSettings(current => ({
-        ...current,
-        characterName: 'Aoi',
-        characterDescription: '',
-        characterExperiences: '',
-        characterTags: '好奇, 温柔',
-        characterInterests: '',
-        characterBehavior: '',
-        characterStartLocation: '家',
-        characterItems: '书包',
-        characterSkills: '',
-        characterAvatarFrame: 0,
-        characterEnergy: 100,
-        characterMood: 100,
-        characterHealth: 100,
-        characterIntelligence: 10,
-        characterFriendship: 10,
-        characterCuriosity: 10,
-        characterCreativity: 10,
-        characterCourage: 10,
-        spriteData: '',
-      }));
-      notify('Character world reset');
-    } catch (error) {
-      appendLog('error', `reset failed: ${String(error)}`);
-      notify('Reset failed');
-    }
+    if (!window.confirm('Reset will reopen initialization and regenerate the starting world with AI. API, model and key settings will be kept.')) return;
+    setInitialProgress(0);
+    setSettings(current => ({ ...current, onboardingComplete: false }));
+    setSettingsOpen(false);
+    setChronicleView('事件');
+    notify('Reopened initialization');
   };
 
   const exportWorld = () => {
@@ -491,7 +654,7 @@ export default function App() {
         setSpriteUrl(data);
         setSpriteFrame(0);
         setSettings(current => ({ ...current, spriteData: data, spriteAtlasWidth: image.width, spriteAtlasHeight: image.height, spriteFrameWidth: size.width, spriteFrameHeight: size.height }));
-        void emit('sprite-updated', { data, width: size.width, height: size.height });
+        void emit('sprite-updated', { data, atlasWidth: image.width, atlasHeight: image.height, frameWidth: size.width, frameHeight: size.height, columns: settings.spriteColumns, rows: settings.spriteRows });
         notify('精灵图已替换并保存');
       };
       reader.readAsDataURL(file);
@@ -509,9 +672,82 @@ export default function App() {
           ? <MapView state={state} />
         : chronicleView === '物品'
           ? <InventoryView state={state} />
-          : <SettingsPanel settings={settings} onChange={setSettings} onClose={() => setChronicleView('事件')} onTest={testProvider} onExport={exportWorld} onReset={resetWorld} onSprite={importSprite} onLogs={() => setLogsOpen(true)} />;
+          : <SettingsPanel settings={settings} onChange={setSettings} onClose={() => setChronicleView('事件')} onSave={() => void saveSettings(() => setChronicleView('事件'))} onTest={testProvider} onExport={exportWorld} onReset={resetWorld} onSprite={importSprite} onLogs={() => setLogsOpen(true)} />;
+  const initialConfig = () => ({
+    name: settings.characterName,
+    worldBackground: settings.worldBackground,
+    characterDescription: settings.characterDescription,
+    characterExperiences: settings.characterExperiences,
+    characterTags: settings.characterTags,
+    characterInterests: settings.characterInterests,
+    characterBehavior: settings.characterBehavior,
+    spriteColumns: settings.spriteColumns,
+    spriteRows: settings.spriteRows,
+    energy: settings.characterEnergy ?? 100,
+    mood: settings.characterMood ?? 100,
+    health: settings.characterHealth ?? 100,
+    intelligence: settings.characterIntelligence ?? 10,
+    friendship: settings.characterFriendship ?? 10,
+    curiosity: settings.characterCuriosity ?? 10,
+    creativity: settings.characterCreativity ?? 10,
+    courage: settings.characterCourage ?? 10,
+    location: settings.characterStartLocation || '',
+    items: settings.characterItems.split(/[,\n，、]/).map(item => item.trim()).filter(Boolean),
+    inventory: [],
+    skills: settings.characterSkills.split(/[,\n，、]/).map(skill => skill.trim()).filter(Boolean),
+    locations: [],
+    npc: null,
+  });
+
+  const completeOnboarding = async () => {
+    try {
+      setInitializing(true);
+      setInitialProgress(10);
+      applySpriteSettings();
+      setInitialProgress(25);
+      const updated = await invoke<WorldSnapshot>('initialize_world_ai', {
+        baseUrl: settings.baseUrl,
+        model: settings.model,
+        apiKey: settings.apiKey || null,
+        language: settings.language,
+        config: initialConfig(),
+        legacyConfig: {
+          name: settings.characterName,
+          energy: settings.characterEnergy ?? 100,
+          mood: settings.characterMood ?? 100,
+          health: settings.characterHealth ?? 100,
+          intelligence: settings.characterIntelligence ?? 10,
+          friendship: settings.characterFriendship ?? 10,
+          curiosity: settings.characterCuriosity ?? 10,
+          creativity: settings.characterCreativity ?? 10,
+          courage: settings.characterCourage ?? 10,
+          location: settings.characterStartLocation || '家',
+          items: settings.characterItems.split(/[,\n，、]/).map(item => item.trim()).filter(Boolean),
+          skills: settings.characterSkills.split(/[,\n，、]/).map(skill => skill.trim()).filter(Boolean),
+        },
+      });
+      setInitialProgress(90);
+      setState(updated);
+      setSettings(current => ({ ...current, onboardingComplete: true, characterEnergy: updated.energy, characterMood: updated.mood, characterHealth: updated.health, characterIntelligence: updated.intelligence, characterFriendship: updated.friendship, characterCuriosity: updated.curiosity, characterCreativity: updated.creativity, characterCourage: updated.courage }));
+      setInitialProgress(100);
+      notify('The You Beyond initialized');
+    } catch (error) {
+      appendLog('error', `initialize failed: ${String(error)}`);
+      notify('Initialize failed');
+    } finally {
+      setInitializing(false);
+    }
+  };
 
   if (isChronicleWindow) {
+    if (!settings.onboardingComplete) {
+      return (
+        <div className="chronicle-window onboarding-window" data-tauri-drag-region onMouseDown={handleWindowDrag}>
+          <OnboardingPanel settings={settings} onChange={setSettings} onSprite={importSprite} onDone={completeOnboarding} busy={initializing} progress={initialProgress} />
+          {toast && <div className="toast"><Sparkles size={14} />{toast}</div>}
+        </div>
+      );
+    }
     return (
       <div className="chronicle-window" data-tauri-drag-region onMouseDown={handleWindowDrag}>
         <div className="chronicle-shell">
@@ -521,7 +757,7 @@ export default function App() {
           <main className="chronicle-content">{chronicleContent}</main>
         </div>
         {logsOpen && <LogsPanel close={() => setLogsOpen(false)} />}
-        {settingsOpen && <SettingsPanel settings={settings} onChange={setSettings} onClose={() => setSettingsOpen(false)} onTest={testProvider} onExport={exportWorld} onReset={resetWorld} onSprite={importSprite} onLogs={() => setLogsOpen(true)} />}
+        {settingsOpen && <SettingsPanel settings={settings} onChange={setSettings} onClose={() => setSettingsOpen(false)} onSave={() => void saveSettings(() => setSettingsOpen(false))} onTest={testProvider} onExport={exportWorld} onReset={resetWorld} onSprite={importSprite} onLogs={() => setLogsOpen(true)} />}
         {toast && <div className="toast"><Sparkles size={14} />{toast}</div>}
       </div>
     );
