@@ -11,7 +11,11 @@ pub async fn generate(config: ProviderConfig, prompt: String) -> Result<String, 
     let endpoint = if base_url.ends_with("/chat/completions") { base_url.to_string() } else { format!("{base_url}/chat/completions") };
     eprintln!("[llm] request endpoint={} model={} api_key_present={} prompt_chars={}", endpoint, config.model, !config.api_key.trim().is_empty(), prompt.chars().count());
     let client = Client::builder().timeout(std::time::Duration::from_secs(120)).build().map_err(|e| e.to_string())?;
-    let system_prompt = if config.language == "en" { "You are an event director. Return only valid JSON. Prefer concise English summaries." } else { "你是持久世界的事件导演。只返回合法 JSON。优先使用简体中文，summary 使用 20-80 个中文字符；只有用户明确要求 English 时才使用英文。不得直接修改数据库。" };
+    let system_prompt = if config.language == "en" {
+        "You are an event director for a persistent world. Return only valid JSON. Write summaries in natural, conversational second-person style beginning with You when appropriate. Keep ordinary events to 1-2 sentences and richer events to 3-5 sentences without repetition. Light humor, teasing, self-deprecation, and personality are welcome when natural. Do not modify the database."
+    } else {
+        "你是持久世界的事件导演。只返回合法 JSON，不要 Markdown 或解释。summary 必须以“你……”为主要开头，像角色在和玩家发消息、随口说今天发生了什么。必须使用简单、具体、生活化的口语，不要写成小说、散文或诗歌；少用形容词和比喻，避免“仿佛、渗进、立体感、微光、层层叠加”等文学化表达，优先描述实际做了什么、看到了什么、心里怎么吐槽。普通小事通常写 1～2 句话，稍有内容的事件自然写 3～5 句话，不要重复凑字数。可以根据角色性格适量加入吐槽、毒舌、自嘲和小幽默，但不要破坏事件因果或显得刻意。优先使用简体中文。不得直接修改数据库。"
+    };
     let mut request = client.post(endpoint).json(&RequestBody { model: &config.model, messages: vec![Message { role: "system", content: system_prompt }, Message { role: "user", content: &prompt }], temperature: 0.7 });
     if !config.api_key.trim().is_empty() { request = request.bearer_auth(config.api_key); }
     let response = request.send().await.map_err(|e| {
@@ -42,18 +46,27 @@ pub async fn test_connection(config: ProviderConfig) -> Result<String, String> {
 }
 
 pub fn parse_proposal(raw: &str) -> Result<serde_json::Value, String> {
-    let cleaned = strip_fences(raw.trim());
-    if let Ok(value) = serde_json::from_str(cleaned) {
+    let cleaned = repair_common_json_typos(strip_fences(raw.trim()));
+    if let Ok(value) = serde_json::from_str(&cleaned) {
         return Ok(value);
     }
-    if let Some(candidate) = extract_json_block(cleaned) {
-        if let Ok(value) = serde_json::from_str(candidate) {
+    if let Some(candidate) = extract_json_block(&cleaned) {
+        if let Ok(value) = serde_json::from_str(&repair_common_json_typos(candidate)) {
             return Ok(value);
         }
     }
     let error = format!("LLM event was not valid JSON: {}", cleaned.chars().take(200).collect::<String>());
     eprintln!("[llm] parse failed: {}", error);
     Err(error)
+}
+
+fn repair_common_json_typos(raw: &str) -> String {
+    let mut repaired = raw.to_string();
+    for key in ["event_type", "summary", "importance", "location", "effects", "participants", "causes", "memory", "relation", "thread_id", "title", "estimated_duration", "progress"] {
+        repaired = repaired.replace(&format!("\"{}':", key), &format!("\"{}\":", key));
+        repaired = repaired.replace(&format!("'{}':", key), &format!("\"{}\":", key));
+    }
+    repaired
 }
 
 fn response_content(body: &str) -> Result<String, String> {
@@ -152,4 +165,5 @@ mod tests {
     #[test] fn reads_chat_completion_content() { let body=r#"{"choices":[{"message":{"content":"{\"type\":\"no_event\"}"}}]}"#; assert!(response_content(body).unwrap().contains("no_event")); }
     #[test] fn reads_text_completion_content() { let body=r#"{"choices":[{"text":"{\"type\":\"no_event\"}"}]}"#; assert!(response_content(body).unwrap().contains("no_event")); }
     #[test] fn rejects_invalid_json() { assert!(parse_proposal("not json").is_err()); }
+    #[test] fn repairs_single_quote_json_key_typo() { assert_eq!(parse_proposal(r#"{"effects': {"energy": -2}, "memory": null}"#).unwrap()["effects"]["energy"], -2); }
 }

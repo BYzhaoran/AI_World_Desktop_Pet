@@ -6,7 +6,7 @@ import { ChevronRight, Cog, Download, Heart, History, MapPin, Package, RefreshCw
 import { initialState } from './simulation';
 import { animationsForGrid, AnimationController, type AnimationState } from './sprite/AnimationController';
 import { frameFor } from './sprite/SpriteSheet';
-import type { EventRecord, PetState, WorldSnapshot } from './types';
+import type { EventEffects, EventRecord, EventThread, PetState, WorldSnapshot } from './types';
 
 type SettingsState = {
   baseUrl: string;
@@ -34,6 +34,8 @@ type SettingsState = {
   characterCuriosity?: number;
   characterCreativity?: number;
   characterCourage?: number;
+  restStart: number;
+  restEnd: number;
   spriteColumns: number;
   spriteRows: number;
   spriteData: string;
@@ -75,6 +77,35 @@ function EventItem({ event }: { event: EventRecord }) {
       </div>
       <p>{event.summary}</p>
       {important && <div className="event-tag">IMPORTANT EVENT <ChevronRight size={12} /></div>}
+    </article>
+  );
+}
+
+function EffectLine({ effects }: { effects?: EventEffects | null }) {
+  if (!effects) return null;
+  const labels: [keyof EventEffects, string, boolean][] = [
+    ['energy', '能量', false], ['mood', '心情', false], ['health', '体力', false],
+    ['intelligence', '智力', true], ['curiosity', '好奇心', true], ['friendship', '社交', true],
+    ['creativity', '创造力', true], ['courage', '勇气', true], ['money', '金币', false],
+    ['exploration', '探索度', false], ['xp', '经验', false],
+  ];
+  const changes = labels
+    .filter(([key]) => typeof effects[key] === 'number' && effects[key] !== 0)
+    .map(([key, label, decimal]) => `${label} ${(effects[key] as number) >= 0 ? '+' : ''}${(effects[key] as number).toFixed(decimal ? 1 : 0)}`);
+  if (effects.item) changes.push('获得物品 +1');
+  return changes.length > 0 ? <div className="progress-effects">{changes.join(' · ')}</div> : null;
+}
+
+function ThreadItem({ thread }: { thread: EventThread }) {
+  const [expanded, setExpanded] = useState(false);
+  const status: Record<string, string> = { planned: '计划中', active: '进行中', paused: '已暂停', completed: '已完成', interrupted: '已中断', failed: '失败', abandoned: '已放弃' };
+  return (
+    <article className={`event thread-event ${thread.importance >= .7 ? 'important' : ''}`}>
+      <div className="event-time">{thread.startTime.match(/T(\d{2}:\d{2})/)?.[1] || thread.startTime}<span>{thread.location}</span></div>
+      <p>{thread.summary}</p>
+      <div className="thread-meta"><span>{status[thread.status] || thread.status} · {Math.round(thread.progress * 100)}%</span><span>{thread.actualDuration ?? thread.estimatedDuration} min</span></div>
+      <button className="thread-toggle" onClick={() => setExpanded(value => !value)}>{expanded ? '▲ 收起' : `▼ 查看 ${thread.updates.length} 个进展`}</button>
+      {expanded && <div className="thread-updates">{thread.updates.length === 0 ? <div className="thread-empty">暂无进展</div> : thread.updates.map(update => <div key={update.id}><time>{update.timestamp.match(/T(\d{2}:\d{2})/)?.[1] || update.timestamp}</time><span>{update.summary}<EffectLine effects={update.effects} /></span></div>)}</div>}
     </article>
   );
 }
@@ -121,6 +152,10 @@ function PetStage({
 }
 
 function Chronicle({ state, onAiGenerate }: { state: PetState; onAiGenerate: () => void }) {
+  const entries = [
+    ...(state.eventThreads || []).map(thread => ({ time: thread.lastUpdateTime || thread.startTime, thread })),
+    ...state.events.map(event => ({ time: event.timestamp, event })),
+  ].sort((left, right) => right.time.localeCompare(left.time)).slice(0, 12);
   return (
     <section className="chronicle">
       <div className="section-title">
@@ -129,7 +164,11 @@ function Chronicle({ state, onAiGenerate }: { state: PetState; onAiGenerate: () 
           <button className="outline-action" onClick={onAiGenerate} title="AI 立即生成一个事件"><Sparkles size={14} />AI 立即生成</button>
         </div>
       </div>
-      <div className="event-list">{state.events.slice(0, 8).map(event => <EventItem event={event} key={event.id} />)}</div>
+      <div className="event-list">
+        {entries.map(entry => 'thread' in entry
+          ? <ThreadItem thread={entry.thread} key={`thread-${entry.thread.id}`} />
+          : <EventItem event={entry.event} key={`event-${entry.event.id}`} />)}
+      </div>
     </section>
   );
 }
@@ -179,6 +218,7 @@ function CharacterView({ state, settings, onChange, spriteUrl, atlasSize, onFram
       <label>背景故事 / 角色简介<textarea value={settings.characterExperiences} onChange={event => update({ characterExperiences: event.target.value })} /></label>
       <label>初始物品<input value={settings.characterItems} onChange={event => update({ characterItems: event.target.value })} placeholder="笔记本, 雨伞" /></label>
       <label>初始技能<input value={settings.characterSkills} onChange={event => update({ characterSkills: event.target.value })} placeholder="阅读, 绘画" /></label>
+      <div className="settings-grid"><label>休息开始（小时）<input type="number" min="0" max="23" value={settings.restStart} onChange={event => update({ restStart: Math.max(0, Math.min(23, Number(event.target.value))) })} /></label><label>休息结束（小时）<input type="number" min="0" max="23" value={settings.restEnd} onChange={event => update({ restEnd: Math.max(0, Math.min(23, Number(event.target.value))) })} /></label></div>
       <label>头像帧<input type="number" min="0" max={settings.spriteColumns * settings.spriteRows - 1} value={settings.characterAvatarFrame} onChange={event => { const frame = Math.max(0, Number(event.target.value)); update({ characterAvatarFrame: frame }); onFrameChange(frame); }} /></label>
     </div>}
     <div className="xp-panel"><div><strong>XP 经验</strong><b>{state.xp} / {state.nextXp}</b></div><Progress value={state.nextXp > 0 ? state.xp / state.nextXp * 100 : 0} color="#c18a34" /></div><div className="profile-dimensions"><strong>五维成长属性</strong><div className="profile-grid">{[['智力', state.intelligence], ['好奇心', state.curiosity], ['社交', state.friendship], ['创造力', state.creativity], ['勇气', state.courage]].map(([label, value]) => <div className="profile-stat" key={String(label)}><span>{label}</span><b>{value}</b><Progress value={Number(value)} /></div>)}</div></div>
@@ -258,7 +298,7 @@ function LogsPanel({ close }: { close: () => void }) {
 
 export default function App() {
   const [state, setState] = useState<PetState>(() => { try { return JSON.parse(localStorage.getItem('aoi-world-state') || 'null') || initialState; } catch { return initialState; } });
-  const [settings, setSettings] = useState<SettingsState>(() => { try { return { baseUrl: '', model: '', language: 'zh', characterName: initialState.name, sidebarEvents: 8, fps: 8, realTime: true, apiKey: '', characterDescription: '', characterExperiences: '', characterTags: '好奇, 温柔', characterInterests: '', characterBehavior: '', characterStartLocation: initialState.location, characterItems: '', characterSkills: '', characterAvatarFrame: 0, characterHealth: 100, characterIntelligence: 50, characterFriendship: 0, characterCuriosity: 50, spriteColumns: 8, spriteRows: 9, spriteData: '', spriteAtlasWidth: 768, spriteAtlasHeight: 936, spriteFrameWidth: 96, spriteFrameHeight: 104, ...JSON.parse(localStorage.getItem('aoi-world-settings') || '{}') }; } catch { return { baseUrl: '', model: '', apiKey: '', language: 'zh', characterName: initialState.name, sidebarEvents: 8, fps: 8, realTime: true, characterDescription: '', characterExperiences: '', characterTags: '好奇, 温柔', characterInterests: '', characterBehavior: '', characterStartLocation: initialState.location, characterItems: '', characterSkills: '', characterAvatarFrame: 0, characterHealth: 100, characterIntelligence: 50, characterFriendship: 0, characterCuriosity: 50, spriteColumns: 8, spriteRows: 9, spriteData: '', spriteAtlasWidth: 768, spriteAtlasHeight: 936, spriteFrameWidth: 96, spriteFrameHeight: 104 }; } });
+  const [settings, setSettings] = useState<SettingsState>(() => { try { return { baseUrl: '', model: '', language: 'zh', characterName: initialState.name, sidebarEvents: 8, fps: 8, realTime: true, apiKey: '', characterDescription: '', characterExperiences: '', characterTags: '好奇, 温柔', characterInterests: '', characterBehavior: '', characterStartLocation: initialState.location, characterItems: '', characterSkills: '', characterAvatarFrame: 0, restStart: 22, restEnd: 8, characterHealth: 100, characterIntelligence: 50, characterFriendship: 0, characterCuriosity: 50, spriteColumns: 8, spriteRows: 9, spriteData: '', spriteAtlasWidth: 768, spriteAtlasHeight: 936, spriteFrameWidth: 96, spriteFrameHeight: 104, ...JSON.parse(localStorage.getItem('aoi-world-settings') || '{}') }; } catch { return { baseUrl: '', model: '', apiKey: '', language: 'zh', characterName: initialState.name, sidebarEvents: 8, fps: 8, realTime: true, characterDescription: '', characterExperiences: '', characterTags: '好奇, 温柔', characterInterests: '', characterBehavior: '', characterStartLocation: initialState.location, characterItems: '', characterSkills: '', characterAvatarFrame: 0, restStart: 22, restEnd: 8, characterHealth: 100, characterIntelligence: 50, characterFriendship: 0, characterCuriosity: 50, spriteColumns: 8, spriteRows: 9, spriteData: '', spriteAtlasWidth: 768, spriteAtlasHeight: 936, spriteFrameWidth: 96, spriteFrameHeight: 104 }; } });
   const [running, setRunning] = useState(true);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [logsOpen, setLogsOpen] = useState(false);
@@ -351,6 +391,8 @@ export default function App() {
         apiKey: settings.apiKey || null,
         language: settings.language,
         characterContext: `Name: ${settings.characterName}\nTags: ${settings.characterTags}\nInterests: ${settings.characterInterests}\nBehavior: ${settings.characterBehavior}\nStart location: ${settings.characterStartLocation}\nStats: energy=${settings.characterEnergy ?? state.energy}, mood=${settings.characterMood ?? state.mood}, health=${settings.characterHealth ?? state.health}, intelligence=${settings.characterIntelligence ?? state.intelligence}, curiosity=${settings.characterCuriosity ?? state.curiosity}, social=${settings.characterFriendship ?? state.friendship}, creativity=${settings.characterCreativity ?? state.creativity}, courage=${settings.characterCourage ?? state.courage}\nInitial items: ${settings.characterItems}\nInitial skills: ${settings.characterSkills}\nPersonality: ${settings.characterDescription}\nExperiences: ${settings.characterExperiences}`,
+        restStart: settings.restStart,
+        restEnd: settings.restEnd,
       });
       setState(updated);
       setSettings(current => ({ ...current, characterEnergy: updated.energy, characterMood: updated.mood, characterHealth: updated.health, characterIntelligence: updated.intelligence, characterFriendship: updated.friendship, characterCuriosity: updated.curiosity, characterCreativity: updated.creativity, characterCourage: updated.courage }));
@@ -369,6 +411,13 @@ export default function App() {
     const timer = window.setInterval(() => { void generateAiEvent(); }, 600000);
     return () => window.clearInterval(timer);
   }, [isChronicleWindow, running, settings.baseUrl, settings.model, settings.apiKey, settings.language, settings.characterDescription, settings.characterExperiences]);
+
+  useEffect(() => {
+    if (!running) return;
+    void invoke('set_rest_hours', { start: settings.restStart, end: settings.restEnd }).catch(error => {
+      appendLog('error', `save rest hours failed: ${String(error)}`);
+    });
+  }, [running, settings.restStart, settings.restEnd]);
 
   const resetWorld = async () => {
     if (!window.confirm('Reset the character world? API, model and key settings will be kept.')) return;

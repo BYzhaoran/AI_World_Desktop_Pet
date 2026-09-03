@@ -1,6 +1,6 @@
 # Relationships
 
-## Yuki
+## 小雨
 - Stage: friend
-- Score: 23/100
+- Score: 10/100
 

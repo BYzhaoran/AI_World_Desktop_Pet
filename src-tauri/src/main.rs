@@ -1,4 +1,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+use chrono::{Local, Timelike};
 mod world;
 mod llm;
 mod scheduler;
@@ -6,6 +7,7 @@ mod scheduler;
 use std::sync::Mutex;
 use std::time::Duration;
 use tauri::{Emitter, Manager, Position, PhysicalPosition, State, WindowEvent};
+use serde_json::{Map, Value};
 use world::{Engine, EventProposal, WorldSnapshot};
 use llm::ProviderConfig;
 
@@ -69,6 +71,11 @@ fn scheduler_tick(engine: State<'_, Mutex<Engine>>) -> Result<Option<String>, St
 }
 
 #[tauri::command]
+fn set_rest_hours(engine: State<'_, Mutex<Engine>>, start: i32, end: i32) -> Result<(), String> {
+    engine.lock().map_err(|e| e.to_string())?.set_rest_hours(start, end).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn toggle_chronicle(app: tauri::AppHandle) -> Result<bool, String> {
     let chronicle = app.get_webview_window("chronicle").ok_or_else(|| "chronicle window not found".to_string())?;
     let visible = chronicle.is_visible().map_err(|e| e.to_string())?;
@@ -97,21 +104,90 @@ async fn test_provider(base_url: String, model: String, api_key: Option<String>)
 }
 
 #[tauri::command]
-async fn generate_event(app: tauri::AppHandle, engine: State<'_, Mutex<Engine>>, base_url: String, model: String, api_key: Option<String>, language: Option<String>, character_context: Option<String>) -> Result<WorldSnapshot, String> {
+async fn generate_event(app: tauri::AppHandle, engine: State<'_, Mutex<Engine>>, base_url: String, model: String, api_key: Option<String>, language: Option<String>, character_context: Option<String>, rest_start: Option<i32>, rest_end: Option<i32>) -> Result<WorldSnapshot, String> {
+    let start = rest_start.unwrap_or(22).clamp(0, 23);
+    let end = rest_end.unwrap_or(8).clamp(0, 23);
     let (snapshot, memory, location_due) = {
-        let guard = engine.lock().map_err(|e| e.to_string())?;
+        let mut guard = engine.lock().map_err(|e| e.to_string())?;
+        guard.set_rest_hours(start, end).map_err(|e| e.to_string())?;
+        guard.scheduler_tick().map_err(|e| e.to_string())?;
         let snapshot = guard.snapshot().map_err(|e| e.to_string())?;
         let memory = guard.memory_context();
         let location_due = guard.location_change_due();
         (snapshot, memory, location_due)
     };
+    let now = Local::now();
+    let hour = now.hour() as i32;
+    let in_rest_period = if start == end { true } else if start < end { hour >= start && hour < end } else { hour >= start || hour < end };
+    if in_rest_period {
+        let sleep_id = format!("sleep-{}", now.format("%Y-%m-%d"));
+        let relation = if snapshot.event_threads.iter().any(|thread| thread.id == sleep_id) { Some("continue".into()) } else { Some("new".into()) };
+        let proposal = EventProposal {
+            event_type: "activity_event".into(),
+            summary: "你已沉沉睡去……".into(),
+            importance: 0.1,
+            location: snapshot.location.clone(),
+            effects: Default::default(),
+            participants: vec!["main".into()],
+            causes: vec!["休息时间".into()],
+            memory: false,
+            relation,
+            thread_id: Some(sleep_id),
+            title: None,
+            estimated_duration: Some(10),
+            progress: None,
+        };
+        eprintln!("[event] rest period active {}:00-{}:00; using fixed sleep event", start, end);
+        let updated = engine.lock().map_err(|e| e.to_string())?.apply(proposal).map_err(|e| e.to_string())?;
+        let _ = app.emit("world-updated", &updated);
+        return Ok(updated);
+    }
+    let latest_thread = snapshot.event_threads.iter()
+        .max_by(|left, right| left.last_update_time.cmp(&right.last_update_time));
+    let latest_instant = snapshot.events.first();
+    let previous_event = match (latest_thread, latest_instant) {
+        (Some(thread), Some(event)) if thread.last_update_time >= event.timestamp => serde_json::json!({
+            "kind": "thread",
+            "id": thread.id,
+            "title": thread.title,
+            "summary": thread.summary,
+            "status": thread.status,
+            "progress": thread.progress,
+            "location": thread.location,
+            "updates": thread.updates,
+        }),
+        (Some(thread), _) => serde_json::json!({
+            "kind": "thread",
+            "id": thread.id,
+            "title": thread.title,
+            "summary": thread.summary,
+            "status": thread.status,
+            "progress": thread.progress,
+            "location": thread.location,
+            "updates": thread.updates,
+        }),
+        (_, Some(event)) => serde_json::json!({
+            "kind": "instant",
+            "id": event.id,
+            "type": event.event_type,
+            "summary": event.summary,
+            "location": event.location,
+        }),
+        _ => serde_json::json!(null),
+    };
     let prompt = format!(
-        "Generate one concrete causal world event from the state, memory, and character context below. Return exactly one valid JSON object, with no Markdown or explanation. Required fields: event_type (one of normal_event, social_event, activity_event, weather_event, discovery_event, item_event, skill_event, relationship_event, important_event, milestone_event, level_up), summary (concise Simplified Chinese sentence), importance (number 0..1), location (string), effects (object with optional numeric energy, mood, health, xp, intelligence, curiosity, friendship, creativity, courage), participants (string array), causes (string array), memory (boolean). For a manual event action, do not return no_event. Do not use a fixed example and do not modify state directly. STATE: {}. MEMORY: {}. CHARACTER: {}. Current local time: {}. A location change opportunity is {}. If the opportunity is false, keep the current location exactly. If true, decide whether to move based on the time, current behavior, energy, mood, weather and known locations; if moving, choose a different known location and make the summary describe the travel.",
+        "Generate one concrete causal world event, then compare it with PREVIOUS TOP-LEVEL EVENT before deciding its relation. Return exactly one valid JSON object, with no Markdown or explanation. Required fields: event_type, summary, importance 0..1, location, effects, participants, causes, memory, relation (exactly continue/new/related/interrupt/resume), thread_id (string or null), title (string or null), estimated_duration (integer or null), progress (object or null with summary, progress 0..1, state planned/active/paused/completed/interrupted/failed/abandoned). The summary must mainly begin with “你……”, speak directly to the player like a character casually chatting about what happened today. Use simple, concrete, everyday Simplified Chinese, like a short chat message. Do not write literary, poetic, atmospheric or novel-like prose; avoid piling up adjectives, metaphors and abstract descriptions. Prefer concrete actions, ordinary objects, short reactions and natural complaints. Ordinary small events should usually be 1-2 sentences; events with meaningful content may naturally use 3-5 sentences. Do not repeat facts to fill space. Add light teasing, sarcasm, self-deprecation or small jokes only when it fits the character and situation. If the current event is the continuation, advancement, next step, or intermediate state of the previous event, MUST return relation continue and the previous thread id; it must become a child Progress, never a new top-level event. This applies even when the wording changes, as long as the same task/activity/story is still underway. Use new only when it is a separate instantaneous event or a genuinely new activity. Use related for a separate activity connected to the previous one, interrupt when the previous activity is stopped by this event, and resume when the interrupted activity starts again. A continuous activity must use estimated_duration 10..40. Progress updates must be meaningful and at least 5 minutes apart. For a manual event action, do not return no_event. Do not modify state directly. STATE: {}. PREVIOUS TOP-LEVEL EVENT: {}. ACTIVE EVENT THREADS: {}. MEMORY: {}. CHARACTER: {}. Current local time: {}. A location change opportunity is {}. If the opportunity is false, keep the current location exactly. If true, decide whether to move based on time, behavior, energy, mood, weather and known locations; if moving, choose a different known location and describe the travel.",
         serde_json::to_string(&snapshot).map_err(|e| e.to_string())?,
+        serde_json::to_string(&previous_event).map_err(|e| e.to_string())?,
+        serde_json::to_string(&snapshot.event_threads).map_err(|e| e.to_string())?,
         memory,
         character_context.unwrap_or_default(),
         snapshot.world_time,
         if location_due { "available" } else { "not available" }
+    );
+    let prompt = format!(
+        "{}\nAdditional hard rules: plan each event thread to have 0 to 4 child progress updates based on its complexity. A simple event may have no progress updates. A complex activity may use 1, 2, 3 or at most 4 meaningful updates. Never create more than 4. The prompt includes the current update count: if there are already 3 updates, make the next update the final meaningful step and mark the thread completed; if there are 4, do not request another update and end the thread. If the activity naturally finishes earlier, complete it without filling unused update slots. For each five-dimensional attribute, sample a probability score from a normal distribution truncated to [0,1], centered at 0.5. A score near 0.5 means no change or a very small change; scores above 0.5 indicate a positive change and scores below 0.5 indicate a negative change. Use the exact local time, current behavior, energy, mood and event outcome to shift the distribution tendency: rest/success/enjoyable activities shift it upward, fatigue/failure/late-night strain shift it downward. The absolute delta must be derived from the distance from 0.5, rounded to one decimal, and remain within the normal-event limit of -1.0..1.0. Do not force every event to change an attribute.",
+        prompt
     );
     let config = ProviderConfig {
         base_url,
@@ -121,14 +197,15 @@ async fn generate_event(app: tauri::AppHandle, engine: State<'_, Mutex<Engine>>,
     };
     eprintln!("[event] generating event with configured provider");
     let raw = llm::generate(config, prompt).await?;
-    let value = llm::parse_proposal(&raw)?;
+    let mut value = llm::parse_proposal(&raw)?;
+    normalize_proposal_value(&mut value);
     eprintln!("[event] parsed proposal json={}", value);
     let mut proposal = serde_json::from_value::<EventProposal>(value).map_err(|error| {
         let message = format!("LLM event schema mismatch: {}", error);
         eprintln!("[event] {}", message);
         message
     })?;
-    if !location_due {
+    if !location_due || proposal.location.trim().is_empty() {
         proposal.location = snapshot.location.clone();
     }
     if proposal.event_type == "no_event" {
@@ -141,6 +218,47 @@ async fn generate_event(app: tauri::AppHandle, engine: State<'_, Mutex<Engine>>,
     let _ = app.emit("world-updated", &updated);
     eprintln!("[event] applied successfully");
     Ok(updated)
+}
+
+fn normalize_proposal_value(value: &mut Value) {
+    let Some(object) = value.as_object_mut() else { return; };
+    if let Some(Value::String(text)) = object.get("effects").cloned() {
+        object.insert("effects".into(), parse_effect_text(&text));
+    }
+    if let Some(Value::String(text)) = object.get("memory").cloned() {
+        object.insert("memory".into(), Value::Bool(!text.trim().is_empty() && text != "false"));
+    } else if object.get("memory").map(Value::is_null).unwrap_or(true) {
+        object.insert("memory".into(), Value::Bool(false));
+    }
+}
+
+fn parse_effect_text(text: &str) -> Value {
+    let mut effects = Map::new();
+    let labels = [
+        ("能量", "energy"), ("心情", "mood"), ("体力", "health"),
+        ("智力", "intelligence"), ("好奇心", "curiosity"), ("社交", "friendship"),
+        ("创造力", "creativity"), ("勇气", "courage"), ("金币", "money"),
+        ("探索度", "exploration"), ("经验", "xp"),
+    ];
+    for part in text.split(|character| matches!(character, '，' | ',' | '、' | ';' | '；')) {
+        let Some((_, key)) = labels.iter().find(|(label, _)| part.contains(label)) else { continue; };
+        let number = part.chars().collect::<Vec<_>>().windows(2)
+            .enumerate()
+            .find_map(|(index, pair)| {
+                if (pair[0] == '+' || pair[0] == '-') && pair[1].is_ascii_digit() {
+                    Some(index)
+                } else { None }
+            })
+            .or_else(|| part.chars().position(|character| character.is_ascii_digit()));
+        let Some(start) = number else { continue; };
+        let numeric = part.chars().skip(start)
+            .take_while(|character| character.is_ascii_digit() || matches!(character, '+' | '-' | '.'))
+            .collect::<String>();
+        if let Ok(parsed) = numeric.parse::<f32>() {
+            effects.insert((*key).into(), serde_json::json!(parsed));
+        }
+    }
+    Value::Object(effects)
 }
 
 pub fn run() {
@@ -208,7 +326,7 @@ pub fn run() {
             });
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![get_world, apply_proposal, reset_world, scheduler_tick, toggle_chronicle, test_provider, generate_event])
+        .invoke_handler(tauri::generate_handler![get_world, apply_proposal, reset_world, scheduler_tick, set_rest_hours, toggle_chronicle, test_provider, generate_event])
         .run(tauri::generate_context!())
         .expect("error while running Aoi's World");
 }

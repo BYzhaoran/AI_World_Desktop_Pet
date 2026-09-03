@@ -61,6 +61,13 @@ button{border:0;background:none;color:inherit;cursor:pointer}
 .event-time{display:flex;align-items:center;gap:7px;color:#a0988c;font:500 9px ui-monospace,monospace}
 .event-time span{margin-left:auto;color:#b0a79c}
 .event p{margin:7px 0 0;color:#514b45;font-size:11px;line-height:1.6}
+.thread-event>strong{display:block;margin-top:7px;color:#302d2a;font-size:12px}
+.thread-meta{display:flex;justify-content:space-between;margin-top:8px;color:#8d867b;font-size:10px}
+.thread-toggle{margin-top:8px;padding:0;color:#a06d39;font-size:10px}
+.thread-updates{margin:8px 0 0 8px;padding-left:10px;border-left:1px solid #ded9cf}
+.thread-updates div{display:flex;gap:8px;padding:5px 0;color:#514b45;font-size:10px;line-height:1.5}
+.thread-updates time{flex:0 0 34px;color:#a0988c;font:500 9px ui-monospace,monospace}
+.progress-effects{margin-top:3px;color:#a06d39;font-size:9px}
 .event.important{padding-left:10px;border-left:3px solid #e4b75c;background:#fbf6e9}
 .event-tag{display:flex;align-items:center;gap:4px;margin-top:7px;color:#c18a34;font:500 8px ui-monospace,monospace}
 .progress{height:5px;margin:8px 0;background:#e9e3da;overflow:hidden}.progress span{display:block;height:100%}

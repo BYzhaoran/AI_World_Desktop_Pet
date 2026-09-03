@@ -64,18 +64,18 @@ pub struct EventProposal {
     pub causes: Vec<String>,
     pub memory: bool,
     #[serde(default)]
-    pub relation: String,
-    #[serde(default)]
+    pub relation: Option<String>,
+    #[serde(default, alias = "thread_id")]
     pub thread_id: Option<String>,
     #[serde(default)]
     pub title: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "estimated_duration")]
     pub estimated_duration: Option<i32>,
     #[serde(default)]
     pub progress: Option<ProgressUpdate>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct ProgressUpdate {
     pub summary: String,
@@ -124,7 +124,7 @@ impl EventProposal {
     pub fn no_event() -> Self {
         Self { event_type: "no_event".into(), summary: String::new(), importance: 0.0,
             location: String::new(), effects: EventEffects::default(), participants: vec![], causes: vec![], memory: false,
-            relation: "new".into(), thread_id: None, title: None, estimated_duration: None, progress: None }
+            relation: Some("new".into()), thread_id: None, title: None, estimated_duration: None, progress: None }
     }
     pub fn xp_delta(&self) -> i32 { self.effects.xp }
     pub fn relationship(&self) -> Option<&RelationshipEffect> { self.effects.relationship.as_ref() }
@@ -193,7 +193,7 @@ impl Engine {
     }
 
     fn migrate(&self) -> rusqlite::Result<()> {
-        self.db.execute_batch("CREATE TABLE IF NOT EXISTS world_state (key TEXT PRIMARY KEY,value TEXT NOT NULL); CREATE TABLE IF NOT EXISTS characters (id TEXT PRIMARY KEY,name TEXT NOT NULL,level INTEGER NOT NULL,xp INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS personality_traits (name TEXT PRIMARY KEY,score INTEGER NOT NULL,color TEXT NOT NULL); CREATE TABLE IF NOT EXISTS events (id TEXT PRIMARY KEY,timestamp TEXT NOT NULL,type TEXT NOT NULL,summary TEXT NOT NULL,importance REAL NOT NULL,location TEXT NOT NULL,causes TEXT NOT NULL,participants TEXT NOT NULL DEFAULT '[]'); CREATE TABLE IF NOT EXISTS personality_evidence (id INTEGER PRIMARY KEY,trait TEXT NOT NULL,delta INTEGER NOT NULL,event_id TEXT NOT NULL,reason TEXT NOT NULL); CREATE TABLE IF NOT EXISTS relationships (npc_id TEXT PRIMARY KEY,score INTEGER NOT NULL,stage TEXT NOT NULL); CREATE TABLE IF NOT EXISTS shared_experiences (id INTEGER PRIMARY KEY,event_ids TEXT NOT NULL,summary TEXT NOT NULL); CREATE TABLE IF NOT EXISTS memories (id TEXT PRIMARY KEY,event_id TEXT NOT NULL,summary TEXT NOT NULL,created_at TEXT NOT NULL); CREATE TABLE IF NOT EXISTS npcs (id TEXT PRIMARY KEY,name TEXT NOT NULL,role TEXT NOT NULL,avatar TEXT NOT NULL); CREATE TABLE IF NOT EXISTS important_people (id TEXT PRIMARY KEY,content TEXT NOT NULL); CREATE TABLE IF NOT EXISTS inventory (id TEXT PRIMARY KEY,name TEXT NOT NULL,quantity INTEGER NOT NULL,description TEXT NOT NULL DEFAULT ''); CREATE TABLE IF NOT EXISTS skills (id TEXT PRIMARY KEY,name TEXT NOT NULL,level INTEGER NOT NULL,experience INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS goals (id TEXT PRIMARY KEY,description TEXT NOT NULL,progress INTEGER NOT NULL,target INTEGER NOT NULL,completed INTEGER NOT NULL);")?;
+        self.db.execute_batch("CREATE TABLE IF NOT EXISTS world_state (key TEXT PRIMARY KEY,value TEXT NOT NULL); CREATE TABLE IF NOT EXISTS characters (id TEXT PRIMARY KEY,name TEXT NOT NULL,level INTEGER NOT NULL,xp INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS personality_traits (name TEXT PRIMARY KEY,score INTEGER NOT NULL,color TEXT NOT NULL); CREATE TABLE IF NOT EXISTS events (id TEXT PRIMARY KEY,timestamp TEXT NOT NULL,type TEXT NOT NULL,summary TEXT NOT NULL,importance REAL NOT NULL,location TEXT NOT NULL,causes TEXT NOT NULL,participants TEXT NOT NULL DEFAULT '[]'); CREATE TABLE IF NOT EXISTS event_threads (id TEXT PRIMARY KEY,title TEXT NOT NULL,summary TEXT NOT NULL,type TEXT NOT NULL,start_time TEXT NOT NULL,last_update_time TEXT NOT NULL,end_time TEXT,estimated_duration INTEGER NOT NULL,actual_duration INTEGER,status TEXT NOT NULL,progress REAL NOT NULL,importance REAL NOT NULL,location TEXT NOT NULL,participants TEXT NOT NULL DEFAULT '[]'); CREATE TABLE IF NOT EXISTS event_progress (id TEXT PRIMARY KEY,thread_id TEXT NOT NULL,timestamp TEXT NOT NULL,summary TEXT NOT NULL,progress REAL NOT NULL,state TEXT NOT NULL,effects TEXT,FOREIGN KEY(thread_id) REFERENCES event_threads(id)); CREATE TABLE IF NOT EXISTS personality_evidence (id INTEGER PRIMARY KEY,trait TEXT NOT NULL,delta INTEGER NOT NULL,event_id TEXT NOT NULL,reason TEXT NOT NULL); CREATE TABLE IF NOT EXISTS relationships (npc_id TEXT PRIMARY KEY,score INTEGER NOT NULL,stage TEXT NOT NULL); CREATE TABLE IF NOT EXISTS shared_experiences (id INTEGER PRIMARY KEY,event_ids TEXT NOT NULL,summary TEXT NOT NULL); CREATE TABLE IF NOT EXISTS memories (id TEXT PRIMARY KEY,event_id TEXT NOT NULL,summary TEXT NOT NULL,created_at TEXT NOT NULL); CREATE TABLE IF NOT EXISTS npcs (id TEXT PRIMARY KEY,name TEXT NOT NULL,role TEXT NOT NULL,avatar TEXT NOT NULL); CREATE TABLE IF NOT EXISTS important_people (id TEXT PRIMARY KEY,content TEXT NOT NULL); CREATE TABLE IF NOT EXISTS inventory (id TEXT PRIMARY KEY,name TEXT NOT NULL,quantity INTEGER NOT NULL,description TEXT NOT NULL DEFAULT ''); CREATE TABLE IF NOT EXISTS skills (id TEXT PRIMARY KEY,name TEXT NOT NULL,level INTEGER NOT NULL,experience INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS goals (id TEXT PRIMARY KEY,description TEXT NOT NULL,progress INTEGER NOT NULL,target INTEGER NOT NULL,completed INTEGER NOT NULL);")?;
         let _ = self.db.execute("ALTER TABLE events ADD COLUMN participants TEXT NOT NULL DEFAULT '[]'", []);
         let _ = self.db.execute("ALTER TABLE npcs ADD COLUMN personality TEXT NOT NULL DEFAULT ''", []);
         let _ = self.db.execute("ALTER TABLE npcs ADD COLUMN favorite_item TEXT NOT NULL DEFAULT ''", []);
@@ -224,10 +224,23 @@ impl Engine {
     fn decimal(&self, key: &str, default: f32) -> f32 { self.value(key).ok().flatten().and_then(|v| v.parse().ok()).unwrap_or(default) }
     fn json<T: for<'a> Deserialize<'a>>(&self, key: &str, default: T) -> T { self.value(key).ok().flatten().and_then(|v| serde_json::from_str(&v).ok()).unwrap_or(default) }
     fn set(tx: &rusqlite::Transaction<'_>, key: &str, value: impl ToString) -> rusqlite::Result<()> { tx.execute("INSERT OR REPLACE INTO world_state(key,value) VALUES (?1,?2)", params![key,value.to_string()]).map(|_| ()) }
+    pub fn set_rest_hours(&mut self, start: i32, end: i32) -> rusqlite::Result<()> {
+        let tx = self.db.transaction()?;
+        Self::set(&tx, "rest_start", start.clamp(0, 23))?;
+        Self::set(&tx, "rest_end", end.clamp(0, 23))?;
+        tx.commit()
+    }
+    pub fn in_rest_period(&self, now: DateTime<Local>) -> bool {
+        let start = self.number("rest_start", 22).clamp(0, 23) as u32;
+        let end = self.number("rest_end", 8).clamp(0, 23) as u32;
+        let hour = now.hour();
+        if start == end { true } else if start < end { hour >= start && hour < end } else { hour >= start || hour < end }
+    }
 
     pub fn snapshot(&self) -> rusqlite::Result<WorldSnapshot> {
         let now = Local::now();
         let events = self.events()?;
+        let event_threads = self.event_threads()?;
         let important_today = events.iter().filter(|e| e.event_type == "important_event" && e.timestamp.starts_with(&now.format("%Y-%m-%d").to_string())).count() as i32;
         let traits = { let mut stmt=self.db.prepare("SELECT name,score,color FROM personality_traits ORDER BY rowid")?; let rows=stmt.query_map([], |r| Ok(Trait{name:r.get(0)?,score:r.get(1)?,color:r.get(2)?}))?; rows.collect::<Result<Vec<_>,_>>()? };
         let npcs = { let mut stmt=self.db.prepare("SELECT n.id,n.name,n.role,COALESCE(r.score,0),COALESCE(r.stage,'acquaintance'),n.avatar,n.personality,n.favorite_item,n.home_location FROM npcs n LEFT JOIN relationships r ON r.npc_id=n.id ORDER BY n.rowid")?; let rows=stmt.query_map([], |r| Ok(Npc{id:r.get(0)?,name:r.get(1)?,role:r.get(2)?,relationship:r.get(3)?,stage:r.get(4)?,avatar:r.get(5)?,personality:r.get(6)?,favorite_item:r.get(7)?,home_location:r.get(8)?}))?; rows.collect::<Result<Vec<_>,_>>()? };
@@ -241,10 +254,31 @@ impl Engine {
             let rows = stmt.query_map([], |r| Ok(PersonalityEvidence { trait_name: r.get(0)?, delta: r.get(1)?, event_id: r.get(2)?, reason: r.get(3)? }))?;
             rows.collect::<Result<Vec<_>, _>>()?
         };
-        Ok(WorldSnapshot { name:self.value("name")?.unwrap_or_else(||"Aoi".into()), level:self.number("level",1), xp:self.number("xp",0), next_xp:self.number("next_xp",100), mood:self.number("mood",50), energy:self.number("energy",50), health:self.number("health",100), intelligence:self.decimal("intelligence",50.0), friendship:self.decimal("friendship",0.0), curiosity:self.decimal("curiosity",50.0), creativity:self.decimal("creativity",50.0), courage:self.decimal("courage",50.0), money:self.number("money",0), location:self.value("location")?.unwrap_or_default(), weather:self.value("weather")?.unwrap_or_default(), status:self.value("status")?.unwrap_or_else(||"正在休息".into()), animation:self.value("animation")?.unwrap_or_else(||"idle".into()), traits, skills:self.json("skills", vec![]), inventory:self.json("inventory", vec![]), goals:self.json("goals", vec![]), npcs, known_locations:self.json("known_locations", vec![]), events, world_time:now.format("%H:%M").to_string(), last_update:self.value("last_update")?.unwrap_or_else(||now.to_rfc3339()), important_today, next_normal_check:next, memory_context:self.memory_context(), memories, personality_evidence, day_count:self.number("day_count",1), total_play_time:self.value("total_play_time")?.and_then(|v|v.parse().ok()).unwrap_or(0), current_behavior:self.value("current_behavior")?.unwrap_or_else(||"idle".into()) })
+        Ok(WorldSnapshot { name:self.value("name")?.unwrap_or_else(||"Aoi".into()), level:self.number("level",1), xp:self.number("xp",0), next_xp:self.number("next_xp",100), mood:self.number("mood",50), energy:self.number("energy",50), health:self.number("health",100), intelligence:self.decimal("intelligence",50.0), friendship:self.decimal("friendship",0.0), curiosity:self.decimal("curiosity",50.0), creativity:self.decimal("creativity",50.0), courage:self.decimal("courage",50.0), money:self.number("money",0), location:self.value("location")?.unwrap_or_default(), weather:self.value("weather")?.unwrap_or_default(), status:self.value("status")?.unwrap_or_else(||"正在休息".into()), animation:self.value("animation")?.unwrap_or_else(||"idle".into()), traits, skills:self.json("skills", vec![]), inventory:self.json("inventory", vec![]), goals:self.json("goals", vec![]), npcs, known_locations:self.json("known_locations", vec![]), events, event_threads, world_time:now.format("%H:%M").to_string(), last_update:self.value("last_update")?.unwrap_or_else(||now.to_rfc3339()), important_today, next_normal_check:next, memory_context:self.memory_context(), memories, personality_evidence, day_count:self.number("day_count",1), total_play_time:self.value("total_play_time")?.and_then(|v|v.parse().ok()).unwrap_or(0), current_behavior:self.value("current_behavior")?.unwrap_or_else(||"idle".into()) })
     }
 
     fn events(&self) -> rusqlite::Result<Vec<EventRecord>> { let mut stmt=self.db.prepare("SELECT id,timestamp,type,summary,importance,location,participants,causes FROM events ORDER BY timestamp DESC")?; let rows=stmt.query_map([], |r| Ok(EventRecord{id:r.get(0)?,timestamp:r.get(1)?,event_type:r.get(2)?,summary:r.get(3)?,importance:r.get(4)?,location:r.get(5)?,participants:serde_json::from_str(&r.get::<_,String>(6)?).unwrap_or_default(),causes:serde_json::from_str(&r.get::<_,String>(7)?).unwrap_or_default()}))?; rows.collect()
+    }
+
+    fn event_threads(&self) -> rusqlite::Result<Vec<EventThread>> {
+        let mut stmt = self.db.prepare("SELECT id,title,summary,type,start_time,last_update_time,end_time,estimated_duration,actual_duration,status,progress,importance,location,participants FROM event_threads ORDER BY start_time DESC")?;
+        let rows = stmt.query_map([], |r| {
+            let id: String = r.get(0)?;
+            let mut progress_stmt = self.db.prepare("SELECT id,thread_id,timestamp,summary,progress,state,effects FROM event_progress WHERE thread_id=?1 ORDER BY timestamp ASC")?;
+            let updates = progress_stmt.query_map([&id], |p| {
+                let effects = p.get::<_, Option<String>>(6)?.and_then(|value| serde_json::from_str(&value).ok());
+                Ok(EventProgress { id:p.get(0)?, thread_id:p.get(1)?, timestamp:p.get(2)?, summary:p.get(3)?, progress:p.get(4)?, state:p.get(5)?, effects })
+            })?.collect::<Result<Vec<_>, _>>()?;
+            Ok(EventThread {
+                id, title:r.get(1)?, summary:r.get(2)?, event_type:r.get(3)?,
+                start_time:r.get(4)?, last_update_time:r.get(5)?, end_time:r.get(6)?,
+                estimated_duration:r.get(7)?, actual_duration:r.get(8)?, status:r.get(9)?,
+                progress:r.get(10)?, importance:r.get(11)?, location:r.get(12)?,
+                participants:serde_json::from_str(&r.get::<_, String>(13)?).unwrap_or_default(),
+                updates,
+            })
+        })?;
+        rows.collect()
     }
 
     fn project_root(&self) -> PathBuf {
@@ -264,16 +298,45 @@ impl Engine {
     }
 
     pub fn location_change_due(&self) -> bool {
-        let now = Local::now().timestamp();
+        self.location_change_due_at(Local::now())
+    }
+
+    fn location_change_due_at(&self, now: DateTime<Local>) -> bool {
+        if self.in_rest_period(now) {
+            return false;
+        }
+        let now = now.timestamp();
         let last = self.value("last_location_change").ok().flatten()
             .and_then(|value| value.parse::<i64>().ok()).unwrap_or(now);
-        let hours = ((now - last).max(0) as f32 / 3600.0).min(24.0);
-        let energy = self.number("energy", 50);
-        if energy < 20 { return false; }
-        let behavior = self.value("current_behavior").ok().flatten().unwrap_or_default();
-        let behavior_modifier = if behavior == "explore" || behavior == "run" { 2.0 } else { 1.0 };
-        let probability = (0.01 + hours * 0.20) * behavior_modifier;
-        unit(now as u64 ^ last as u64) < probability.min(0.45)
+        now - last >= 4 * 3600
+    }
+
+    fn enforce_location_schedule(&mut self, now: DateTime<Local>) -> rusqlite::Result<bool> {
+        let current = self.value("location")?.unwrap_or_else(|| "家".into());
+        let target = if self.in_rest_period(now) {
+            if current == "家" { return Ok(false); }
+            Some("家".to_string())
+        } else if self.location_change_due_at(now) {
+            let locations: Vec<Location> = self.json("known_locations", vec![]);
+            let alternatives: Vec<String> = locations.into_iter()
+                .map(|location| location.name)
+                .filter(|name| !name.is_empty() && name != &current)
+                .collect();
+            if alternatives.is_empty() {
+                None
+            } else {
+                Some(alternatives[(now.timestamp().unsigned_abs() as usize) % alternatives.len()].clone())
+            }
+        } else {
+            None
+        };
+        let Some(target) = target else { return Ok(false); };
+        let tx = self.db.transaction()?;
+        Self::set(&tx, "location", &target)?;
+        Self::set(&tx, "last_location_change", now.timestamp())?;
+        tx.commit()?;
+        eprintln!("[world] scheduled location change: {} -> {}", current, target);
+        Ok(true)
     }
 
     pub fn scheduler_tick(&mut self) -> rusqlite::Result<Option<String>> {
@@ -291,6 +354,7 @@ impl Engine {
         if elapsed > 0 {
             self.simulate_elapsed(now, elapsed)?;
         }
+        self.enforce_location_schedule(Local::now())?;
         let now = Local::now().timestamp();
         if let Some(kind) = self.run_time_constraints(Local::now())? {
             return Ok(Some(kind));
@@ -325,6 +389,8 @@ impl Engine {
             current >= start && current <= end
         };
         let date = if hour < 8 { (now - chrono::Duration::days(1)).format("%Y-%m-%d") } else { now.format("%Y-%m-%d") };
+        let rest_start = (self.number("rest_start", 22).clamp(0, 23) as u32) * 60;
+        let rest_end = (self.number("rest_end", 8).clamp(0, 23) as u32) * 60;
         let rules = [
             ("breakfast", 7 * 60, 10 * 60, "吃了早饭，开始准备今天的生活。", "activity_event"),
             ("lunch", 11 * 60 + 30, 14 * 60, "吃了一顿午饭，能量恢复了一些。", "activity_event"),
@@ -333,7 +399,14 @@ impl Engine {
             ("special_activity", 19 * 60, 22 * 60, "参加了一次夜间特别活动，发现了新的线索。", "discovery_event"),
         ];
         for (key, start, end, summary, event_type) in rules {
-            let matches = if key == "sleep" { hour >= 22 || hour < 8 } else { in_window(start, end) };
+            let matches = if key == "sleep" {
+                let current = hour * 60 + minute;
+                if rest_start == rest_end { true } else if rest_start < rest_end {
+                    current >= rest_start && current < rest_end
+                } else {
+                    current >= rest_start || current < rest_end
+                }
+            } else { in_window(start, end) };
             if !matches { continue; }
             let marker = format!("time_event_{}_{}", date, key);
             if self.value(&marker)?.is_some() { continue; }
@@ -384,17 +457,23 @@ impl Engine {
 
         for minute in 0..minutes {
             let cursor = now - (minutes - minute) * 60;
+            let in_rest_period = chrono::DateTime::<chrono::Utc>::from_timestamp(cursor, 0)
+                .map(|time| self.in_rest_period(time.with_timezone(&Local)))
+                .unwrap_or(false);
             if offline {
-                behavior = if energy < 35.0 { "sleep".into() } else { "rest".into() };
+                behavior = if in_rest_period && energy < 35.0 { "sleep".into() } else { "rest".into() };
                 energy += if behavior == "sleep" { 0.30 } else { 0.04 };
                 mood += if behavior == "sleep" { 0.04 } else { 0.0 };
             } else {
                 if energy < 5.0 {
-                    behavior = "sleep".into();
+                    behavior = if in_rest_period { "sleep".into() } else { "rest".into() };
                     behavior_until = cursor + 180;
                 } else if cursor >= behavior_until {
                     let roll = unit(seed.wrapping_add(minute as u64 * 7919));
                     behavior = choose_behavior(roll, energy, mood, intelligence, friendship, curiosity, creativity, courage);
+                    if behavior == "sleep" && !in_rest_period {
+                        behavior = "rest".into();
+                    }
                     behavior_until = cursor + 30 + ((unit(seed + minute as u64 * 104729) * 150.0) as i64);
                 }
                 let cost = match behavior.as_str() {
@@ -549,7 +628,7 @@ impl Engine {
     }
 
     pub fn reset(&mut self) -> rusqlite::Result<()> {
-        self.db.execute_batch("DELETE FROM world_state; DELETE FROM events; DELETE FROM personality_evidence; DELETE FROM relationships; DELETE FROM shared_experiences; DELETE FROM memories; DELETE FROM inventory; DELETE FROM skills; DELETE FROM goals; DELETE FROM personality_traits; DELETE FROM npcs; DELETE FROM characters; DELETE FROM important_people;")?;
+        self.db.execute_batch("DELETE FROM world_state; DELETE FROM events; DELETE FROM event_progress; DELETE FROM event_threads; DELETE FROM personality_evidence; DELETE FROM relationships; DELETE FROM shared_experiences; DELETE FROM memories; DELETE FROM inventory; DELETE FROM skills; DELETE FROM goals; DELETE FROM personality_traits; DELETE FROM npcs; DELETE FROM characters; DELETE FROM important_people;")?;
         self.seed_defaults()?;
         let locations = r#"[{"name":"家","description":"可以休息和整理物品的地方。","exploration":0,"rarity":"common"},{"name":"学校","description":"学习、完成任务和认识新朋友的地方。","exploration":0,"rarity":"common"},{"name":"便利店","description":"可以买到日常用品和简单食物。","exploration":0,"rarity":"common"},{"name":"公园","description":"适合散步、玩耍和观察环境。","exploration":0,"rarity":"common"},{"name":"街道","description":"连接各个地点的日常道路。","exploration":0,"rarity":"common"}]"#;
         let names = ["小雨", "晴", "阿岚", "小夏", "星野"];
@@ -571,12 +650,22 @@ impl Engine {
         tx.commit()
     }
 
-    pub fn apply(&mut self, p: EventProposal) -> rusqlite::Result<WorldSnapshot> {
+    pub fn apply(&mut self, mut p: EventProposal) -> rusqlite::Result<WorldSnapshot> {
         if p.event_type == "no_event" {
             return Err(rusqlite::Error::InvalidParameterName("silent events are disabled".into()));
         }
         if !EVENT_TYPES.contains(&p.event_type.as_str()) { return Err(rusqlite::Error::InvalidParameterName("invalid event type".into())); }
         if p.summary.trim().is_empty() || p.summary.chars().count()>160 { return Err(rusqlite::Error::InvalidParameterName("summary must be 1-160 characters".into())); }
+        self.enforce_location_schedule(Local::now())?;
+        if self.in_rest_period(Local::now()) {
+            p.location = "家".into();
+        } else if let Some(location) = self.value("location")? {
+            p.location = location;
+        }
+        if is_sleep_event(&p) && !self.in_rest_period(Local::now()) {
+            eprintln!("[event] rejected sleep event outside configured rest period");
+            return Err(rusqlite::Error::InvalidParameterName("sleep events are only allowed during the configured rest period".into()));
+        }
         let xp=self.number("xp",0); let mut level=self.number("level",1); let mut next=self.number("next_xp",100); let mood=(self.number("mood",50)+p.effects.mood).clamp(0,100); let energy=(self.number("energy",50)+p.effects.energy).clamp(0,100); let health=(self.number("health",100)+p.effects.health).clamp(0,100); let money=self.number("money",0)+p.effects.money; let new_xp_delta=p.xp_delta().clamp(0,50); let mut total=xp+new_xp_delta;
         let mut level_ups = 0;
         while total>=next { total-=next; level+=1; next=(next as f32*1.35).round() as i32; level_ups += 1; }
@@ -615,7 +704,75 @@ impl Engine {
         let mut goals: Vec<Goal> = self.json("goals", vec![]);
         let old_location = self.value("location")?.unwrap_or_default();
         let tx=self.db.transaction()?;
-        tx.execute("INSERT INTO events(id,timestamp,type,summary,importance,location,causes,participants) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",params![&id,now.to_rfc3339(),&p.event_type,&display_summary,p.importance.clamp(0.0,1.0),&p.location,serde_json::to_string(&p.causes).unwrap(),serde_json::to_string(&p.participants).unwrap()])?;
+        let relation = match p.relation.as_deref() {
+            Some("continue") | Some("new") | Some("related") | Some("interrupt") | Some("resume") => p.relation.as_deref().unwrap(),
+            _ => "new",
+        };
+        let duration = p.estimated_duration.unwrap_or(if p.event_type == "activity_event" { 20 } else { 0 }).clamp(0, 40);
+        let active_thread_id = tx.query_row("SELECT id FROM event_threads WHERE status IN ('planned','active','paused') AND location=?1 ORDER BY last_update_time DESC LIMIT 1", params![&p.location], |row| row.get::<_, String>(0)).optional().ok().flatten();
+        let requested_thread_exists = p.thread_id.as_deref().and_then(|value| {
+            tx.query_row("SELECT id FROM event_threads WHERE id=?1", params![value], |row| row.get::<_, String>(0)).optional().ok().flatten()
+        });
+        let thread_id = requested_thread_exists.or_else(|| {
+            tx.query_row("SELECT id FROM event_threads WHERE status IN ('planned','active','paused') AND location=?1 ORDER BY last_update_time DESC LIMIT 1", params![&p.location], |row| row.get::<_, String>(0)).optional().ok().flatten()
+        });
+        let inferred_continuation = matches!(p.relation.as_deref(), None | Some("new"))
+            && active_thread_id.is_some()
+            && (p.estimated_duration.is_none() || duration < 10)
+            && matches!(p.event_type.as_str(), "activity_event" | "discovery_event" | "skill_event" | "relationship_event");
+        let effective_relation = if inferred_continuation { "continue" } else { relation };
+        let effective_thread_id = if inferred_continuation { active_thread_id.clone() } else { thread_id };
+        let is_thread = duration >= 10 || effective_thread_id.is_some() || matches!(effective_relation, "continue" | "related" | "interrupt" | "resume");
+        if is_thread {
+            let target_thread = if effective_relation == "new" || effective_relation == "related" || effective_thread_id.is_none() {
+                let new_id = p.thread_id.clone().unwrap_or_else(|| format!("thread-{}", now.timestamp_millis()));
+                let state = p.progress.as_ref().and_then(|value| value.state.as_deref()).unwrap_or("active");
+                let initial_progress = p.progress.as_ref().map(|value| value.progress.clamp(0.0, 1.0)).unwrap_or(0.0);
+                tx.execute("INSERT OR IGNORE INTO event_threads(id,title,summary,type,start_time,last_update_time,end_time,estimated_duration,actual_duration,status,progress,importance,location,participants) VALUES (?1,?2,?3,?4,?5,?5,NULL,?6,NULL,?7,?8,?9,?10,?11)", params![
+                    &new_id, p.title.as_deref().unwrap_or(p.summary.trim()), &display_summary, &p.event_type,
+                    now.to_rfc3339(), duration.max(10), state, initial_progress, p.importance.clamp(0.0, 1.0),
+                    &p.location, serde_json::to_string(&p.participants).unwrap()
+                ])?;
+                Some(new_id)
+            } else {
+                effective_thread_id
+            };
+            if let Some(thread_id) = target_thread {
+                let previous: Option<String> = tx.query_row("SELECT last_update_time FROM event_threads WHERE id=?1", params![&thread_id], |row| row.get(0)).optional()?;
+                let elapsed = previous.as_deref().and_then(|value| DateTime::parse_from_rfc3339(value).ok()).map(|value| (now.with_timezone(value.offset()) - value).num_seconds()).unwrap_or(600);
+                let current_progress: f32 = tx.query_row("SELECT progress FROM event_threads WHERE id=?1", params![&thread_id], |row| row.get(0)).optional()?.unwrap_or(0.0);
+                let progress_count: i32 = tx.query_row("SELECT COUNT(*) FROM event_progress WHERE thread_id=?1", params![&thread_id], |row| row.get(0))?;
+                let fallback_progress = ProgressUpdate {
+                    summary: p.summary.trim().to_string(),
+                    progress: (current_progress + 0.2).min(0.95),
+                    state: Some("active".into()),
+                };
+                let update = if progress_count < 4 && (p.progress.is_some() || elapsed >= 5 * 60) {
+                    Some(p.progress.as_ref().unwrap_or(&fallback_progress))
+                } else { None };
+                let status = p.progress.as_ref().and_then(|value| value.state.as_deref()).unwrap_or(if effective_relation == "interrupt" { "interrupted" } else if effective_relation == "resume" { "active" } else { "active" });
+                let finishing_update = progress_count >= 3 && update.is_some();
+                let status = if finishing_update { "completed" } else { status };
+                let progress = if finishing_update { 1.0 } else { p.progress.as_ref().map(|value| value.progress.clamp(0.0, 1.0)).unwrap_or(if status == "completed" { 1.0 } else { 0.0 }) };
+                if let Some(update) = update {
+                    let progress_id = format!("progress-{}", now.timestamp_millis());
+                    tx.execute("INSERT INTO event_progress(id,thread_id,timestamp,summary,progress,state,effects) VALUES (?1,?2,?3,?4,?5,?6,?7)", params![
+                        progress_id, &thread_id, now.to_rfc3339(), update.summary.trim(),
+                        update.progress.clamp(0.0, 1.0), status, serde_json::to_string(&normalized_effects).unwrap()
+                    ])?;
+                }
+                let terminal = matches!(status, "completed" | "failed" | "abandoned" | "interrupted");
+                let actual_duration = if terminal {
+                    let start = previous.as_deref().and_then(|value| DateTime::parse_from_rfc3339(value).ok()).map(|value| value.timestamp());
+                    Some(((now.timestamp() - start.unwrap_or(now.timestamp())).max(0) / 60) as i32)
+                } else { None };
+                tx.execute("UPDATE event_threads SET last_update_time=?1,status=?2,progress=?3,end_time=?4,actual_duration=?5 WHERE id=?6", params![
+                    now.to_rfc3339(), status, progress, if terminal { Some(now.to_rfc3339()) } else { None::<String> }, actual_duration, &thread_id
+                ])?;
+            }
+        } else {
+            tx.execute("INSERT INTO events(id,timestamp,type,summary,importance,location,causes,participants) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",params![&id,now.to_rfc3339(),&p.event_type,&display_summary,p.importance.clamp(0.0,1.0),&p.location,serde_json::to_string(&p.causes).unwrap(),serde_json::to_string(&p.participants).unwrap()])?;
+        }
         Self::set(&tx,"xp",total)?; Self::set(&tx,"level",level)?; Self::set(&tx,"next_xp",next)?; Self::set(&tx,"mood",mood)?; Self::set(&tx,"energy",energy)?; Self::set(&tx,"health",health)?; Self::set(&tx,"intelligence",format!("{:.1}",intelligence))?; Self::set(&tx,"friendship",format!("{:.1}",friendship))?; Self::set(&tx,"curiosity",format!("{:.1}",curiosity))?; Self::set(&tx,"creativity",format!("{:.1}",creativity))?; Self::set(&tx,"courage",format!("{:.1}",courage))?; Self::set(&tx,"money",money)?; Self::set(&tx,"location",&p.location)?; if p.location != old_location { Self::set(&tx,"last_location_change",now.timestamp())?; } Self::set(&tx,"last_update",now.to_rfc3339())?; Self::set(&tx,"next_normal_check",now.timestamp()+1800)?;
         if let Some((target,delta))=rel {
             let score: i32 = tx.query_row("SELECT score FROM relationships WHERE npc_id=?1", params![target], |row| row.get(0)).optional()?.unwrap_or(0);
@@ -708,6 +865,19 @@ fn unit(seed: u64) -> f32 {
     (value as f64 / u64::MAX as f64) as f32
 }
 
+fn is_sleep_event(proposal: &EventProposal) -> bool {
+    if proposal.event_type == "sleep_event" {
+        return true;
+    }
+    if proposal.event_type != "activity_event" {
+        return false;
+    }
+    let text = format!("{} {}", proposal.summary, proposal.title.as_deref().unwrap_or_default());
+    ["\u{7761}", "\u{5165}\u{7761}", "\u{7761}\u{89c9}", "\u{7761}\u{53bb}", "\u{6c89}\u{6c89}"]
+        .iter()
+        .any(|keyword| text.contains(keyword))
+}
+
 fn effects_suffix(effects: &EventEffects) -> String {
     let mut changes = Vec::new();
     if effects.energy != 0 { changes.push(format!("能量 {:+}", effects.energy)); }
@@ -767,6 +937,7 @@ fn relationship_stage(score: i32) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
 
     fn engine() -> Engine {
         let db = Connection::open_in_memory().unwrap();
@@ -799,7 +970,7 @@ mod tests {
         let snapshot = engine.apply(EventProposal {
             event_type: "normal_event".into(), summary: "测试事件".into(), importance: 2.0,
             location: "房间".into(), effects: EventEffects { mood: 50, energy: -100, xp: 50, ..Default::default() },
-            participants: vec!["main".into()], causes: vec!["event-old".into()], memory: true,
+            participants: vec!["main".into()], causes: vec!["event-old".into()], memory: true, ..Default::default()
         }).unwrap();
         assert_eq!(snapshot.mood, 100);
         assert_eq!(snapshot.energy, 0);
@@ -814,12 +985,101 @@ mod tests {
             event_type: "normal_event".into(), summary: "属性测试".into(), importance: 0.4,
             location: "房间".into(),
             effects: EventEffects { creativity: 2.0, friendship: -1.26, ..Default::default() },
-            participants: vec!["main".into()], causes: vec![], memory: false,
+            participants: vec!["main".into()], causes: vec![], memory: false, ..Default::default()
         }).unwrap();
         assert_eq!(snapshot.creativity, 51.0);
         assert_eq!(snapshot.friendship, 0.0);
         assert!(snapshot.events[0].summary.contains("创造力 +1.0"));
         assert!(!snapshot.events[0].summary.contains("创造力 +2"));
+    }
+
+    #[test]
+    fn activity_without_duration_creates_expandable_thread() {
+        let mut engine = engine();
+        let snapshot = engine.apply(EventProposal {
+            event_type: "activity_event".into(), summary: "去图书馆学习".into(), importance: 0.4,
+            location: "图书馆".into(), effects: EventEffects::default(),
+            participants: vec!["main".into()], causes: vec![], memory: false,
+            relation: None, ..Default::default()
+        }).unwrap();
+        assert_eq!(snapshot.events.len(), 0);
+        assert_eq!(snapshot.event_threads.len(), 1);
+        assert_eq!(snapshot.event_threads[0].estimated_duration, 20);
+        assert_eq!(snapshot.event_threads[0].updates.len(), 0);
+    }
+
+    #[test]
+    fn thread_plans_at_most_four_progress_updates() {
+        let mut engine = engine();
+        let first = engine.apply(EventProposal {
+            event_type: "activity_event".into(), summary: "开始学习".into(), importance: 0.4,
+            location: "图书馆".into(), estimated_duration: Some(30),
+            participants: vec!["main".into()], ..Default::default()
+        }).unwrap();
+        let thread_id = first.event_threads[0].id.clone();
+        for index in 0..3 {
+            engine.db.execute(
+                "INSERT INTO event_progress(id,thread_id,timestamp,summary,progress,state) VALUES (?1,?2,datetime('now',?3),?4,?5,'active')",
+                params![format!("seed-progress-{index}"), &thread_id, format!("-{} minutes", 10 + index), format!("进展 {index}"), (index as f32 + 1.0) / 5.0],
+            ).unwrap();
+        }
+        let old_time = (Local::now() - chrono::Duration::minutes(10)).to_rfc3339();
+        engine.db.execute("UPDATE event_threads SET last_update_time=?1 WHERE id=?2", params![old_time, &thread_id]).unwrap();
+        let snapshot = engine.apply(EventProposal {
+            event_type: "activity_event".into(), summary: "继续学习".into(), importance: 0.4,
+            location: "图书馆".into(), relation: Some("continue".into()), thread_id: Some(thread_id),
+            progress: Some(ProgressUpdate { summary: "继续完成练习".into(), progress: 0.9, state: Some("active".into()) }),
+            participants: vec!["main".into()], ..Default::default()
+        }).unwrap();
+        assert_eq!(snapshot.event_threads[0].updates.len(), 4);
+        assert_eq!(snapshot.event_threads[0].status, "completed");
+    }
+
+    #[test]
+    fn explicit_progress_is_saved_without_waiting_five_minutes() {
+        let mut engine = engine();
+        let first = engine.apply(EventProposal {
+            event_type: "activity_event".into(), summary: "继续阅读".into(), importance: 0.2,
+            location: "家".into(), estimated_duration: Some(20),
+            participants: vec!["main".into()], ..Default::default()
+        }).unwrap();
+        let thread_id = first.event_threads[0].id.clone();
+        let snapshot = engine.apply(EventProposal {
+            event_type: "normal_event".into(), summary: "你合上书去洗漱".into(), importance: 0.2,
+            location: "家".into(), relation: Some("continue".into()), thread_id: Some(thread_id),
+            progress: Some(ProgressUpdate { summary: "你合上书去洗漱".into(), progress: 0.5, state: Some("active".into()) }),
+            participants: vec!["main".into()], ..Default::default()
+        }).unwrap();
+        assert_eq!(snapshot.events.len(), 0);
+        assert_eq!(snapshot.event_threads[0].updates.len(), 1);
+        assert_eq!(snapshot.event_threads[0].updates[0].summary, "你合上书去洗漱");
+    }
+
+    #[test]
+    fn rest_period_forces_location_home() {
+        let mut engine = engine();
+        let tx = engine.db.transaction().unwrap();
+        Engine::set(&tx, "location", "学校").unwrap();
+        Engine::set(&tx, "rest_start", 22).unwrap();
+        Engine::set(&tx, "rest_end", 8).unwrap();
+        tx.commit().unwrap();
+        engine.enforce_location_schedule(Local.with_ymd_and_hms(2026, 9, 4, 23, 0, 0).unwrap()).unwrap();
+        assert_eq!(engine.value("location").unwrap().unwrap(), "家");
+    }
+
+    #[test]
+    fn non_rest_period_forces_location_change_after_four_hours() {
+        let mut engine = engine();
+        let now = Local.with_ymd_and_hms(2026, 9, 4, 12, 0, 0).unwrap();
+        let tx = engine.db.transaction().unwrap();
+        Engine::set(&tx, "location", "家").unwrap();
+        Engine::set(&tx, "known_locations", r#"[{"name":"家","description":"","exploration":0,"rarity":"common"},{"name":"学校","description":"","exploration":0,"rarity":"common"}]"#).unwrap();
+        Engine::set(&tx, "last_location_change", now.timestamp() - 4 * 3600).unwrap();
+        Engine::set(&tx, "rest_start", 22).unwrap();
+        Engine::set(&tx, "rest_end", 8).unwrap();
+        tx.commit().unwrap();
+        engine.enforce_location_schedule(now).unwrap();
+        assert_eq!(engine.value("location").unwrap().unwrap(), "学校");
     }
 
     #[test]
@@ -830,7 +1090,7 @@ mod tests {
         let snapshot = engine.apply(EventProposal {
             event_type: "relationship_event".into(), summary: "关系变化".into(), importance: 0.5,
             location: "图书馆".into(), effects: EventEffects { relationship: Some(RelationshipEffect { target: "yuki".into(), delta: 5 }), ..Default::default() },
-            participants: vec!["main".into(), "yuki".into()], causes: vec![], memory: false,
+            participants: vec!["main".into(), "yuki".into()], causes: vec![], memory: false, ..Default::default()
         }).unwrap();
         assert_eq!(snapshot.npcs.iter().find(|npc| npc.id == "yuki").unwrap().relationship, 23);
         assert_eq!(snapshot.npcs.iter().find(|npc| npc.id == "yuki").unwrap().stage, "friend");
