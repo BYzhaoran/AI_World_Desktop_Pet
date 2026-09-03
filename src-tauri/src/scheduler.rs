@@ -14,6 +14,6 @@ pub fn should_schedule(context: WindowContext, target_per_day: f32) -> bool { im
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test] fn daily_balance_reduces_probability() { let base=WindowContext{hours_since_important:7.0,important_today:0,recent_event_count:1,goal_pressure:.5,relationship_opportunity:.5,random_factor:.5}; assert!(important_probability(base,2.0)>important_probability(WindowContext{important_today:2,..base},2.0)); }
+    #[test] fn daily_balance_reduces_probability() { let base=WindowContext{hours_since_important:7.0,important_today:0,recent_event_count:1,goal_pressure:0.5,relationship_opportunity:0.5,random_factor:0.5}; assert!(important_probability(base,2.0)>important_probability(WindowContext{important_today:2,..base},2.0)); }
     #[test] fn context_can_break_cooldown() { let ctx=WindowContext{hours_since_important:1.0,important_today:0,recent_event_count:0,goal_pressure:1.0,relationship_opportunity:1.0,random_factor:1.0}; assert!(should_schedule(ctx,2.0)); }
 }

@@ -1,36 +1,376 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState, type MouseEvent } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { BookOpen, Brain, ChevronRight, CircleHelp, CloudRain, Cog, Download, Heart, History, Home, Moon, MoreHorizontal, Package, Pause, Play, Plus, RefreshCw, Settings, Sparkles, Users, Zap } from 'lucide-react';
-import { applyEvent, createOfflineEvent, initialState } from './simulation';
-import type { EventRecord, PetState } from './types';
+import { emit, listen } from '@tauri-apps/api/event';
+import { getCurrentWindow } from '@tauri-apps/api/window';
+import { ChevronRight, Cog, Download, Heart, History, Package, RefreshCw, Sparkles, X } from 'lucide-react';
+import { initialState } from './simulation';
+import { animationsForGrid, AnimationController, type AnimationState } from './sprite/AnimationController';
+import { frameFor } from './sprite/SpriteSheet';
+import type { EventRecord, PetState, WorldSnapshot } from './types';
 
-const nav = [{ icon: Home, label: '世界' }, { icon: History, label: '编年史' }, { icon: Users, label: '关系' }, { icon: Package, label: '物品' }, { icon: Brain, label: '性格' }];
-type SettingsState = { baseUrl: string; model: string; apiKey: string; language: 'zh' | 'en'; sidebarEvents: number; fps: number; realTime: boolean };
+type SettingsState = {
+  baseUrl: string;
+  model: string;
+  apiKey: string;
+  language: 'zh' | 'en';
+  characterName: string;
+  sidebarEvents: number;
+  fps: number;
+  realTime: boolean;
+  characterDescription: string;
+  characterExperiences: string;
+  spriteColumns: number;
+  spriteRows: number;
+  spriteData: string;
+  spriteAtlasWidth: number;
+  spriteAtlasHeight: number;
+  spriteFrameWidth: number;
+  spriteFrameHeight: number;
+};
+type LogEntry = { time: string; level: 'info' | 'error'; message: string };
+type ResizeDirection = 'East' | 'North' | 'NorthEast' | 'NorthWest' | 'South' | 'SouthEast' | 'SouthWest' | 'West';
+type SettingsTab = 'provider' | 'character' | 'sprite' | 'runtime';
 
-function Progress({ value, color = '#d66b62' }: { value: number; color?: string }) { return <div className="progress"><span style={{ width: `${Math.min(100, value)}%`, background: color }} /></div>; }
-function EventItem({ event }: { event: EventRecord }) { const important = event.type === 'important_event'; return <article className={`event ${important ? 'important' : ''}`}><div className="event-time">{important && <Sparkles size={13} />} {event.timestamp}<span>{event.location}</span></div><p>{event.summary}</p>{important && <div className="event-tag">IMPORTANT EVENT <ChevronRight size={12} /></div>}</article>; }
+function appendLog(level: LogEntry['level'], message: string) {
+  const entry = { time: new Date().toISOString(), level, message };
+  try {
+    const previous = JSON.parse(localStorage.getItem('aoi-world-logs') || '[]') as LogEntry[];
+    localStorage.setItem('aoi-world-logs', JSON.stringify([...previous, entry].slice(-100)));
+  } catch {}
+  (level === 'error' ? console.error : console.info)(`[aoi-world] ${message}`);
+}
 
-function PetStage({ state, onClick, spriteUrl }: { state: PetState; onClick: () => void; spriteUrl: string }) { return <section className="stage"><div className="stage-top"><span className="live-dot" /> WORLD IS ALIVE <span className="stage-date">SEP 02, 2026</span></div><div className="weather"><CloudRain size={17} /> {state.weather}</div><div className="scene"><div className="sun" /><div className="window"><i /><i /><i /></div><div className="shelf"><b /><b /><b /><b /><b /></div><div className="desk"><span className="lamp" /><span className="book-stack" /></div><div className="plant"><span /><em /></div><button className={`pet ${state.animation}`} onClick={onClick} aria-label="查看 Aoi 状态">{spriteUrl ? <img className="pet-sprite" src={spriteUrl} alt="" /> : <><div className="pet-shadow" /><div className="pet-hair" /><div className="pet-face"><i /><i /><b /></div><div className="pet-body" /><div className="pet-dress" /></>}</button><div className="speech">{state.status}<small>·</small></div><div className="floor" /></div><div className="stage-footer"><div><span className="eyebrow">CURRENT LOCATION</span><strong><BookOpen size={17} /> {state.location}</strong></div><div className="stage-actions"><button title="暂停模拟"><Pause size={15} /></button><button title="更多操作"><MoreHorizontal size={17} /></button></div></div></section>; }
+function Progress({ value, color = '#d66b62' }: { value: number; color?: string }) {
+  return <div className="progress"><span style={{ width: `${Math.min(100, value)}%`, background: color }} /></div>;
+}
 
-function Overview({ state }: { state: PetState }) { return <><section className="identity"><div className="identity-avatar">A<span className="online" /></div><div><h1>{state.name}</h1><p>quiet · curious · kind</p></div><span className="level">LV. {state.level}</span><button className="icon-button"><Settings size={17} /></button></section><section className="xp-block"><div className="row-label"><span>EXPERIENCE</span><b>{state.xp} <small>/ {state.nextXp} XP</small></b></div><Progress value={state.xp / state.nextXp * 100} /><div className="row-label muted"><span>UNTIL LEVEL {state.level + 1}</span><span>{Math.max(0, state.nextXp - state.xp)} XP TO GO</span></div></section><div className="stat-grid"><div><Moon size={17} /><span>MOOD</span><strong>{state.mood}<small>/ 100</small></strong><Progress value={state.mood} color="#e4b75c" /></div><div><Zap size={17} /><span>ENERGY</span><strong>{state.energy}<small>/ 100</small></strong><Progress value={state.energy} color="#5c9a9b" /></div></div><section className="panel-section"><div className="section-title"><span>PERSONALITY</span><button>VIEW ALL <ChevronRight size={13} /></button></div>{state.traits.map(t => <div className="trait" key={t.name}><span>{t.name}</span><Progress value={t.score} color={t.color} /><b>{t.score}</b></div>)}</section><section className="panel-section"><div className="section-title"><span>GOALS IN PROGRESS</span><button>VIEW ALL <ChevronRight size={13} /></button></div>{state.goals.map(g => <div className="goal" key={g.name}><div><strong>{g.name}</strong><span>{g.progress}% complete</span></div><Progress value={g.progress} color="#7582b6" /></div>)}</section></>; }
+function EventItem({ event }: { event: EventRecord }) {
+  const important = event.type === 'important_event';
+  return (
+    <article className={`event ${important ? 'important' : ''}`}>
+      <div className="event-time">
+        {important && <Sparkles size={13} />}
+        {event.timestamp}
+        <span>{event.location}</span>
+      </div>
+      <p>{event.summary}</p>
+      {important && <div className="event-tag">IMPORTANT EVENT <ChevronRight size={12} /></div>}
+    </article>
+  );
+}
 
-function Sidebar({ state, onAdd }: { state: PetState; onAdd: () => void }) { return <aside className="sidebar"><div className="sidebar-head"><div><span className="eyebrow">YOUR COMPANION</span><h2>Character overview</h2></div><button className="icon-button"><MoreHorizontal size={18} /></button></div><Overview state={state} /><section className="panel-section inventory"><div className="section-title"><span>RECENTLY FOUND</span><button>INVENTORY <ChevronRight size={13} /></button></div>{state.inventory.map(item => <div className="item" key={item.name}><div className="item-icon"><BookOpen size={16} /></div><div><strong>{item.name}</strong><span>{item.detail}</span></div></div>)}</section><section className="panel-section people"><div className="section-title"><span>PEOPLE IN HER WORLD</span><button onClick={onAdd}><Plus size={14} /> ADD</button></div>{state.npcs.map(npc => <div className="person" key={npc.id}><div className="person-avatar">{npc.avatar}</div><div><strong>{npc.name}</strong><span>{npc.role}</span></div><div className="heart"><Heart size={13} fill="currentColor" /> {npc.relationship}</div></div>)}</section></aside>; }
+function PetStage({
+  state,
+  spriteUrl,
+  frame,
+  atlasSize,
+  spriteGrid,
+  onClick,
+  onResize,
+}: {
+  state: PetState;
+  spriteUrl: string;
+  frame: number;
+  atlasSize: { width: number; height: number };
+  spriteGrid: { columns: number; rows: number };
+  onClick: () => void;
+  onResize: (direction: ResizeDirection, event: MouseEvent<HTMLSpanElement>) => void;
+}) {
+  const drag = () => { void getCurrentWindow().startDragging().catch(() => undefined); };
+  const frameRect = spriteUrl ? frameFor({ width: atlasSize.width, height: atlasSize.height, columns: spriteGrid.columns, rows: spriteGrid.rows }, frame) : undefined;
+  const style = spriteUrl && frameRect ? {
+    width: frameRect.width,
+    height: frameRect.height,
+    backgroundImage: `url(${spriteUrl})`,
+    backgroundSize: `${atlasSize.width}px ${atlasSize.height}px`,
+    backgroundPosition: `${-frameRect.x}px ${-frameRect.y}px`,
+  } : undefined;
 
-function SettingsPanel({ settings, onChange, onClose, onTest, onExport, onImport, onSprite }: { settings: SettingsState; onChange: (next: SettingsState) => void; onClose: () => void; onTest: () => void; onExport: () => void; onImport: (file: File) => void; onSprite: (file: File) => void }) { return <div className="modal-backdrop" onMouseDown={onClose}><section className="settings-panel" onMouseDown={event => event.stopPropagation()}><div className="settings-header"><div><span className="eyebrow">WORLD CONFIGURATION</span><h2>Settings</h2></div><button className="icon-button" onClick={onClose} aria-label="关闭"><ChevronRight size={18} style={{ transform: 'rotate(90deg)' }} /></button></div><div className="settings-group"><span className="settings-label">AI PROVIDER</span><label>Base URL<input value={settings.baseUrl} onChange={event => onChange({ ...settings, baseUrl: event.target.value })} placeholder="https://example.com/v1" /></label><label>Model<input value={settings.model} onChange={event => onChange({ ...settings, model: event.target.value })} placeholder="your-model" /></label><label>API Key<input type="password" value={settings.apiKey} onChange={event => onChange({ ...settings, apiKey: event.target.value })} placeholder="Stored in OS keychain for desktop builds" /></label><label>Output language<select value={settings.language} onChange={event => onChange({ ...settings, language: event.target.value as 'zh' | 'en' })}><option value="zh">中文优先</option><option value="en">English</option></select></label><button className="outline-action" onClick={onTest}><RefreshCw size={14} /> TEST CONNECTION</button></div><div className="settings-group sprite-upload"><span className="settings-label">SPRITE ATLAS</span><label className="outline-action">IMPORT PNG ATLAS<input hidden type="file" accept="image/png" onChange={event => event.target.files?.[0] && onSprite(event.target.files[0])} /></label><small>透明 PNG，默认 8 列 x 9 行，程序会按实际尺寸校验。</small></div><div className="settings-grid"><label>Sidebar events<select value={settings.sidebarEvents} onChange={event => onChange({ ...settings, sidebarEvents: Number(event.target.value) })}><option value="5">5</option><option value="10">10</option><option value="20">20</option><option value="30">30</option></select></label><label>Animation FPS<input type="number" min="1" max="30" value={settings.fps} onChange={event => onChange({ ...settings, fps: Number(event.target.value) })} /></label></div><div className="toggle-row"><span><strong>Real-time mode</strong><small>1 real minute = 1 world minute</small></span><button className={`toggle ${settings.realTime ? 'on' : ''}`} onClick={() => onChange({ ...settings, realTime: !settings.realTime })}><i /></button></div><div className="settings-footer"><button className="text-action" onClick={() => { if (window.confirm('This will delete all character progress, memories, relationships and event history. Continue?')) { localStorage.removeItem('aoi-world-state'); location.reload(); } }}>RESET WORLD</button><div className="settings-actions"><button className="outline-action" onClick={onExport}><Download size={14} /> EXPORT</button><label className="outline-action">IMPORT<input hidden type="file" accept="application/json" onChange={event => event.target.files?.[0] && onImport(event.target.files[0])} /></label><button className="primary-action" onClick={onClose}>SAVE SETTINGS</button></div></div></section></div>; }
+  return (
+    <section className="pet-stage">
+      <div className="pet-drag-zone" data-tauri-drag-region onMouseDown={drag}>
+        <button className={`sprite-pet ${spriteUrl ? 'has-sprite' : ''}`} onMouseDown={event => { event.preventDefault(); event.stopPropagation(); }} onClick={event => { event.currentTarget.blur(); onClick(); }} aria-label={`打开 ${state.name} 窗口`}>
+          {spriteUrl ? <span className="sprite-frame" style={style} /> : <><div className="pet-shadow" /><div className="pet-hair" /><div className="pet-face"><i /><i /><b /></div><div className="pet-body" /><div className="pet-dress" /></>}
+        </button>
+      </div>
+      {(['North', 'South', 'East', 'West', 'NorthEast', 'NorthWest', 'SouthEast', 'SouthWest'] as ResizeDirection[]).map(direction => (
+        <span key={direction} className={`pet-resize-handle ${direction.toLowerCase()}`} onMouseDown={event => onResize(direction, event)} />
+      ))}
+    </section>
+  );
+}
+
+function Chronicle({ state, onAiGenerate }: { state: PetState; onAiGenerate: () => void }) {
+  return (
+    <section className="chronicle">
+      <div className="section-title">
+        <div><span className="eyebrow">REAL-TIME MEMORY</span><h3>Chronicle</h3></div>
+        <div className="chronicle-actions">
+          <button className="outline-action" onClick={onAiGenerate} title="AI 立即生成一个事件"><Sparkles size={14} />AI 立即生成</button>
+        </div>
+      </div>
+      <div className="event-list">{state.events.slice(0, 8).map(event => <EventItem event={event} key={event.id} />)}</div>
+    </section>
+  );
+}
+
+function RelationshipsView({ state }: { state: PetState }) {
+  return <section className="detail-view"><div className="section-title"><div><span className="eyebrow">SOCIAL GRAPH</span><h3>人际</h3></div></div><div className="detail-list">{state.npcs.map(npc => <article className="detail-row" key={npc.id}><div className="person-avatar">{npc.avatar}</div><div><strong>{npc.name}</strong><span>{npc.role}</span></div><b className="detail-score"><Heart size={13} /> {npc.relationship}</b></article>)}</div></section>;
+}
+
+function PersonalityView({ state }: { state: PetState }) {
+  return <section className="detail-view"><div className="section-title"><div><span className="eyebrow">EVOLVING CHARACTER</span><h3>性格</h3></div></div><div className="trait-list">{state.traits.map(trait => <div className="trait" key={trait.name}><span>{trait.name}</span><Progress value={trait.score} color={trait.color} /><b>{trait.score}</b></div>)}</div></section>;
+}
+
+function InventoryView({ state }: { state: PetState }) {
+  return <section className="detail-view"><div className="section-title"><div><span className="eyebrow">COLLECTED OBJECTS</span><h3>物品</h3></div></div><div className="detail-list">{state.inventory.map(item => <article className="detail-row" key={item.name}><div className="item-icon"><Package size={16} /></div><div><strong>{item.name}</strong><span>{item.detail}</span></div></article>)}</div></section>;
+}
+
+function SettingsPanel({ settings, onChange, onClose, onTest, onExport, onReset, onSprite, onLogs }: {
+  settings: SettingsState;
+  onChange: (next: SettingsState) => void;
+  onClose: () => void;
+  onTest: () => void;
+  onExport: () => void;
+  onReset: () => void;
+  onSprite: (file: File) => void;
+  onLogs: () => void;
+}) {
+  const [tab, setTab] = useState<SettingsTab>('provider');
+  const update = (patch: Partial<SettingsState>) => onChange({ ...settings, ...patch });
+  return (
+    <div className="modal-backdrop" onMouseDown={onClose}>
+      <section className="settings-panel" onMouseDown={event => event.stopPropagation()}>
+        <header><div><span className="eyebrow">WORLD CONFIGURATION</span><h2>Settings</h2></div><button className="icon-button" onClick={onClose}><X size={18} /></button></header>
+        <nav className="settings-tabs">
+          {([['provider', 'API / Model'], ['character', 'Character'], ['sprite', 'Sprite / Animation'], ['runtime', 'Runtime']] as const).map(([key, label]) => <button key={key} className={tab === key ? 'active' : ''} onClick={() => setTab(key)}>{label}</button>)}
+        </nav>
+        {tab === 'provider' && <>
+          <label>Base URL<input value={settings.baseUrl} onChange={event => update({ baseUrl: event.target.value })} placeholder="https://example.com/v1" /></label>
+          <label>Model<input value={settings.model} onChange={event => update({ model: event.target.value })} placeholder="your-model" /></label>
+          <label>API Key<input type="password" value={settings.apiKey} onChange={event => update({ apiKey: event.target.value })} /></label>
+          <label>Output language<select value={settings.language} onChange={event => update({ language: event.target.value as 'zh' | 'en' })}><option value="zh">中文优先</option><option value="en">English</option></select></label>
+          <div className="settings-actions settings-page-actions"><button className="outline-action" onClick={onTest}><RefreshCw size={14} /> TEST CONNECTION</button></div>
+        </>}
+        {tab === 'character' && <>
+          <label>Character name<input value={settings.characterName} onChange={event => update({ characterName: event.target.value })} placeholder="Character name" /></label>
+          <label>Personality description<textarea value={settings.characterDescription} onChange={event => update({ characterDescription: event.target.value })} placeholder="Describe personality, habits and preferences." /></label>
+          <label>Experiences and background<textarea value={settings.characterExperiences} onChange={event => update({ characterExperiences: event.target.value })} placeholder="Describe important experiences and memories." /></label>
+        </>}
+        {tab === 'sprite' && <>
+          <label className="settings-section-title">Sprite sheet</label>
+          <div className="settings-grid">
+            <label>Columns<select value={settings.spriteColumns} onChange={event => { const columns = Number(event.target.value); update({ spriteColumns: columns, spriteFrameWidth: settings.spriteAtlasWidth / columns }); }}><option value="8">8 columns</option><option value="10">10 columns</option></select></label>
+            <label>Rows<select value={settings.spriteRows} onChange={event => { const rows = Number(event.target.value); update({ spriteRows: rows, spriteFrameHeight: settings.spriteAtlasHeight / rows }); }}><option value="9">9 rows</option><option value="10">10 rows</option></select></label>
+          </div>
+          <label className="outline-action sprite-picker">IMPORT PNG SPRITE<input hidden type="file" accept="image/png" onChange={event => event.target.files?.[0] && onSprite(event.target.files[0])} /></label>
+          <label>Animation FPS<input type="number" min="0.5" max="10" step="0.5" value={settings.fps} onChange={event => update({ fps: Number(event.target.value) })} /></label>
+        </>}
+        {tab === 'runtime' && <>
+          <label>Chronicle events<select value={settings.sidebarEvents} onChange={event => update({ sidebarEvents: Number(event.target.value) })}><option value="5">5</option><option value="8">8</option><option value="10">10</option><option value="20">20</option></select></label>
+          <label className="check-row"><input type="checkbox" checked={settings.realTime} onChange={event => update({ realTime: event.target.checked })} /> Real-time mode</label>
+          <div className="settings-actions settings-page-actions"><button className="outline-action" onClick={onLogs}>OPEN LOGS</button><button className="outline-action" onClick={onExport}><Download size={14} /> EXPORT</button></div>
+        </>}
+        <div className="settings-actions">
+          <button className="text-action" onClick={onReset}>RESET WORLD</button>
+          <button className="primary-action" onClick={onClose}>SAVE</button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function LogsPanel({ close }: { close: () => void }) {
+  const [logs, setLogs] = useState<LogEntry[]>(() => { try { return JSON.parse(localStorage.getItem('aoi-world-logs') || '[]'); } catch { return []; } });
+  const clear = () => { localStorage.removeItem('aoi-world-logs'); setLogs([]); };
+  return <div className="modal-backdrop" onMouseDown={close}><section className="settings-panel log-panel" onMouseDown={event => event.stopPropagation()}><header><div><span className="eyebrow">DIAGNOSTICS</span><h2>Logs</h2></div><button className="icon-button" onClick={close}><X size={18} /></button></header><div className="log-list">{logs.slice().reverse().map((entry, index) => <div className={`log-entry ${entry.level}`} key={`${entry.time}-${index}`}><time>{entry.time}</time><p>{entry.message}</p></div>)}</div><div className="settings-actions"><button className="text-action" onClick={clear}>CLEAR</button><button className="primary-action" onClick={close}>CLOSE</button></div></section></div>;
+}
 
 export default function App() {
-  const [state, setState] = useState<PetState>(() => { const saved = localStorage.getItem('aoi-world-state'); return saved ? JSON.parse(saved) : initialState; });
-  const [tab, setTab] = useState('世界'); const [running, setRunning] = useState(true); const [toast, setToast] = useState(''); const [settingsOpen, setSettingsOpen] = useState(false);
-  const [settings, setSettings] = useState<SettingsState>(() => { const saved = localStorage.getItem('aoi-world-settings'); return saved ? { language: 'zh', ...JSON.parse(saved), apiKey: '' } : { baseUrl: '', model: '', apiKey: '', language: 'zh', sidebarEvents: 10, fps: 8, realTime: true }; });
-  const [spriteUrl, setSpriteUrl] = useState('');
-  useEffect(() => localStorage.setItem('aoi-world-state', JSON.stringify(state)), [state]);
-  useEffect(() => { const { apiKey: _apiKey, ...safeSettings } = settings; localStorage.setItem('aoi-world-settings', JSON.stringify(safeSettings)); }, [settings]);
-  useEffect(() => { if (!running) return; const timer = window.setInterval(() => setState(current => applyEvent(current, createOfflineEvent(current))), 60000); return () => window.clearInterval(timer); }, [running]);
-  const notify = (message: string) => { setToast(message); window.setTimeout(() => setToast(''), 2400); };
-  const addEvent = async () => { let event = createOfflineEvent(state); if (settings.baseUrl && settings.model) { try { const proposal = await invoke<{ eventType: string; summary: string; importance: number; location: string }>('generate_event', { baseUrl: settings.baseUrl, model: settings.model, apiKey: settings.apiKey || null, language: settings.language, prompt: '根据最新角色记忆、当前地点和最近事件，提出一个简短且有因果关联的日常事件。优先中文，不要改变数据库。' }); event = { ...event, type: (proposal.eventType as EventRecord['type']) || 'normal_event', summary: proposal.summary || event.summary, importance: proposal.importance || event.importance, location: proposal.location || event.location }; } catch { notify('AI 暂不可用，已使用离线事件'); } } setState(current => applyEvent(current, event)); try { await invoke('apply_proposal', { proposal: { eventType: event.type, summary: event.summary, importance: event.importance, location: event.location, xpDelta: 5, relationshipTarget: null, relationshipDelta: 0 } }); } catch { /* Browser preview and offline mode use the local event. */ } notify('已记录一段新的日常'); };
-  const testProvider = async () => { try { await invoke('test_provider', { baseUrl: settings.baseUrl, model: settings.model, apiKey: settings.apiKey || null }); notify('Provider 配置已通过基础检查'); } catch { notify(settings.baseUrl && settings.model ? '浏览器预览：配置已保存' : '请先填写 Base URL 和 Model'); } };
-  const exportWorld = () => { const blob = new Blob([JSON.stringify({ exportedAt: new Date().toISOString(), state }, null, 2)], { type: 'application/json' }); const link = document.createElement('a'); link.href = URL.createObjectURL(blob); link.download = 'aoi-world-export.json'; link.click(); URL.revokeObjectURL(link.href); notify('世界数据已导出'); };
-  const importWorld = (file: File) => { const reader = new FileReader(); reader.onload = () => { try { const imported = JSON.parse(String(reader.result)); if (!imported.state?.name || !Array.isArray(imported.state.events)) throw new Error('invalid'); setState(imported.state); notify('世界数据已导入'); } catch { notify('导入失败：文件格式无效'); } }; reader.readAsText(file); };
-  const importSprite = (file: File) => { if (file.type !== 'image/png') { notify('精灵图必须是 PNG'); return; } const url = URL.createObjectURL(file); const image = new Image(); image.onload = () => { if (image.width % 8 || image.height % 9) { URL.revokeObjectURL(url); notify('精灵图尺寸无法均分为 8 x 9'); return; } setSpriteUrl(url); notify(`精灵图已导入：${image.width / 8} x ${image.height / 9} frame`); }; image.onerror = () => { URL.revokeObjectURL(url); notify('精灵图读取失败'); }; image.src = url; };
-  return <div className="app"><header className="topbar"><div className="brand"><div className="brand-mark">✦</div><div><strong>AOI'S WORLD</strong><span>PERSISTENT CHARACTER SIMULATION</span></div></div><div className="world-clock"><span className="live-dot" /><span>REAL WORLD TIME</span><b>{new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</b></div><div className="top-actions"><button className="icon-button" title="帮助"><CircleHelp size={18} /></button><button className="icon-button" title="设置" onClick={() => setSettingsOpen(true)}><Cog size={18} /></button><button className="avatar-button">Z</button></div></header><div className="layout"><nav className="nav">{nav.map(item => { const Icon = item.icon; return <button key={item.label} className={tab === item.label ? 'active' : ''} onClick={() => setTab(item.label)}><Icon size={18} /><span>{item.label}</span></button>; })}<div className="nav-bottom"><button onClick={exportWorld}><Download size={18} /><span>导出世界</span></button><button onClick={() => setSettingsOpen(true)}><Settings size={18} /><span>设置</span></button></div></nav><main className="main"><div className="main-heading"><div><span className="eyebrow">WEDNESDAY · SEPTEMBER 02</span><h2>{tab === '世界' ? '她的世界' : tab}</h2></div><div className="engine-status"><span className="pulse" /> {running ? 'ENGINE RUNNING' : 'ENGINE PAUSED'} <button onClick={() => setRunning(!running)}>{running ? <Pause size={14} /> : <Play size={14} />}</button></div></div><div className="content-grid"><PetStage state={state} spriteUrl={spriteUrl} onClick={() => notify('Aoi 正在安静地读书')} /><section className="chronicle"><div className="section-title"><div><span className="eyebrow">RECENT ACTIVITY</span><h3>Chronicle</h3></div><button onClick={addEvent}><RefreshCw size={14} /> SIMULATE</button></div><div className="event-list">{state.events.slice(0, settings.sidebarEvents).map(event => <EventItem event={event} key={event.id} />)}</div><button className="load-more">LOAD EARLIER MEMORIES <ChevronRight size={14} /></button></section></div></main><Sidebar state={state} onAdd={() => notify('人物编辑器将在下一版开放')} /></div>{toast && <div className="toast"><Sparkles size={15} />{toast}</div>}{settingsOpen && <SettingsPanel settings={settings} onChange={setSettings} onClose={() => setSettingsOpen(false)} onTest={testProvider} onExport={exportWorld} onImport={importWorld} onSprite={importSprite} />}</div>;
+  const [state, setState] = useState<PetState>(() => { try { return JSON.parse(localStorage.getItem('aoi-world-state') || 'null') || initialState; } catch { return initialState; } });
+  const [settings, setSettings] = useState<SettingsState>(() => { try { return { baseUrl: '', model: '', language: 'zh', characterName: initialState.name, sidebarEvents: 8, fps: 8, realTime: true, apiKey: '', characterDescription: '', characterExperiences: '', spriteColumns: 8, spriteRows: 9, spriteData: '', spriteAtlasWidth: 768, spriteAtlasHeight: 936, spriteFrameWidth: 96, spriteFrameHeight: 104, ...JSON.parse(localStorage.getItem('aoi-world-settings') || '{}') }; } catch { return { baseUrl: '', model: '', apiKey: '', language: 'zh', characterName: initialState.name, sidebarEvents: 8, fps: 8, realTime: true, characterDescription: '', characterExperiences: '', spriteColumns: 8, spriteRows: 9, spriteData: '', spriteAtlasWidth: 768, spriteAtlasHeight: 936, spriteFrameWidth: 96, spriteFrameHeight: 104 }; } });
+  const [running, setRunning] = useState(true);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [logsOpen, setLogsOpen] = useState(false);
+  const [toast, setToast] = useState('');
+  const [spriteUrl, setSpriteUrl] = useState(() => { try { return JSON.parse(localStorage.getItem('aoi-world-settings') || '{}').spriteData || ''; } catch { return ''; } });
+  const [spriteFrame, setSpriteFrame] = useState(0);
+  const animationRef = useRef(new AnimationController(animationsForGrid(settings.spriteColumns, settings.spriteRows)));
+  const generatingRef = useRef(false);
+  const [chronicleView, setChronicleView] = useState<'事件' | '人际' | '性格' | '物品' | '设置'>('事件');
+  const windowLabel = getCurrentWindow().label;
+  const isChronicleWindow = windowLabel === 'chronicle';
+
+  const notify = (message: string) => {
+    appendLog('info', message);
+    setToast(message);
+    window.setTimeout(() => setToast(''), 2400);
+  };
+
+  const handleWindowDrag = (event: MouseEvent<HTMLDivElement>) => {
+    if ((event.target as HTMLElement).closest('button,input,textarea,select')) return;
+    void getCurrentWindow().startDragging().catch(() => undefined);
+  };
+  const handleWindowResize = (direction: ResizeDirection, event: MouseEvent<HTMLSpanElement>) => {
+    event.stopPropagation();
+    void getCurrentWindow().startResizeDragging(direction).catch(error => appendLog('error', `resize failed: ${String(error)}`));
+  };
+
+  useEffect(() => { localStorage.setItem('aoi-world-state', JSON.stringify(state)); }, [state]);
+  useEffect(() => { localStorage.setItem('aoi-world-settings', JSON.stringify(settings)); }, [settings]);
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void (async () => {
+      try {
+        const snapshot = await invoke<WorldSnapshot>('get_world');
+        setState(current => ({ ...snapshot, name: settings.characterName.trim() || current.name || snapshot.name }));
+        appendLog('info', 'backend connected');
+        unlisten = await listen<WorldSnapshot>('world-updated', event => {
+          appendLog('info', `world-updated events=${event.payload.events.length}`);
+          setState(event.payload);
+        });
+      } catch (error) {
+        appendLog('error', `backend unavailable: ${String(error)}`);
+      }
+    })();
+    return () => unlisten?.();
+  }, []);
+  useEffect(() => {
+    const name = settings.characterName.trim();
+    if (name) setState(current => current.name === name ? current : { ...current, name });
+  }, [settings.characterName]);
+  useEffect(() => {
+    if (!spriteUrl || !running) return;
+    const animations = animationsForGrid(settings.spriteColumns, settings.spriteRows);
+    const configuredFps = Math.max(0.5, Math.min(10, Number(settings.fps) || 8));
+    Object.values(animations).forEach(animation => {
+      animation.minFps = configuredFps;
+      animation.maxFps = configuredFps;
+    });
+    animationRef.current = new AnimationController(animations);
+    let frameId = 0;
+    const started = performance.now();
+    const animate = (now: number) => {
+      const source = state.animation;
+      const animation: AnimationState = source === 'idle' ? 'Idle' : source === 'social' ? 'Band' : source === 'celebrating' ? 'Special' : source === 'thinking' ? 'Robot' : source === 'happy' ? 'Walk' : 'Idle';
+      setSpriteFrame(animationRef.current.tick(animation, now - started));
+      frameId = requestAnimationFrame(animate);
+    };
+    frameId = requestAnimationFrame(animate);
+    return () => cancelAnimationFrame(frameId);
+  }, [spriteUrl, running, settings.fps, settings.spriteColumns, settings.spriteRows, state.animation]);
+  useEffect(() => { let unlisten: (() => void) | undefined; void listen<{ data: string }>('sprite-updated', event => { setSpriteUrl(event.payload.data); setSpriteFrame(0); }).then(stop => { unlisten = stop; }); return () => unlisten?.(); }, []);
+  useEffect(() => { if (!isChronicleWindow) return; let unlisten: (() => void) | undefined; void listen('open-settings', () => setSettingsOpen(true)).then(stop => { unlisten = stop; }); return () => unlisten?.(); }, [isChronicleWindow]);
+
+  const generateAiEvent = async () => {
+    if (generatingRef.current) return;
+    if (!settings.baseUrl.trim() || !settings.model.trim()) {
+      const message = '请先填写 Base URL 和 Model';
+      appendLog('error', message);
+      notify(message);
+      return;
+    }
+    generatingRef.current = true;
+    appendLog('info', 'starting AI event generation');
+    try {
+      setState(await invoke<WorldSnapshot>('generate_event', {
+        baseUrl: settings.baseUrl,
+        model: settings.model,
+        apiKey: settings.apiKey || null,
+        language: settings.language,
+        characterContext: `Name: ${settings.characterName}\nPersonality: ${settings.characterDescription}\nExperiences: ${settings.characterExperiences}`,
+      }));
+      notify('AI event generated');
+    } catch (error) {
+      const message = `AI event failed: ${String(error)}`;
+      appendLog('error', message);
+      notify(message);
+    } finally {
+      generatingRef.current = false;
+    }
+  };
+
+  useEffect(() => {
+    if (!isChronicleWindow || !running) return;
+    const timer = window.setInterval(() => { void generateAiEvent(); }, 600000);
+    return () => window.clearInterval(timer);
+  }, [isChronicleWindow, running, settings.baseUrl, settings.model, settings.apiKey, settings.language, settings.characterDescription, settings.characterExperiences]);
+
+  const resetWorld = async () => {
+    if (!window.confirm('This will delete all character progress, memories, relationships and event history. Continue?')) return;
+    try { await invoke('reset_world'); } catch {}
+    localStorage.removeItem('aoi-world-state');
+    location.reload();
+  };
+
+  const exportWorld = () => {
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(new Blob([JSON.stringify({ exportedAt: new Date().toISOString(), state }, null, 2)], { type: 'application/json' }));
+    link.download = 'aoi-world-export.json';
+    link.click();
+    notify('世界数据已导出');
+  };
+
+  const testProvider = async () => {
+    if (!settings.baseUrl.trim() || !settings.model.trim()) { notify('请填写 Base URL 和 Model'); return; }
+    try {
+      const result = await invoke<string>('test_provider', { baseUrl: settings.baseUrl, model: settings.model, apiKey: settings.apiKey || null });
+      appendLog('info', `provider test success: ${result}`);
+      notify(result);
+    } catch (error) {
+      const message = `Provider test failed: ${String(error)}`;
+      appendLog('error', message);
+      notify(message);
+    }
+  };
+
+  const toggleChronicle = async () => { try { await invoke('toggle_chronicle'); } catch { notify('事件栏窗口不可用'); } };
+
+  const importSprite = (file: File) => {
+    if (file.type !== 'image/png') { notify('精灵图必须是 PNG'); return; }
+    const image = new Image();
+    image.onload = () => {
+      if (image.width < settings.spriteColumns || image.height < settings.spriteRows) { notify('精灵图尺寸太小，无法切分当前网格'); return; }
+      const reader = new FileReader();
+      reader.onload = () => {
+        const data = String(reader.result);
+        const size = { width: image.width / settings.spriteColumns, height: image.height / settings.spriteRows };
+        setSpriteUrl(data);
+        setSpriteFrame(0);
+        setSettings(current => ({ ...current, spriteData: data, spriteAtlasWidth: image.width, spriteAtlasHeight: image.height, spriteFrameWidth: size.width, spriteFrameHeight: size.height }));
+        void emit('sprite-updated', { data, width: size.width, height: size.height });
+        notify('精灵图已替换并保存');
+      };
+      reader.readAsDataURL(file);
+    };
+    image.src = URL.createObjectURL(file);
+  };
+
+  const chronicleContent = chronicleView === '事件'
+    ? <Chronicle state={state} onAiGenerate={generateAiEvent} />
+    : chronicleView === '人际'
+      ? <RelationshipsView state={state} />
+      : chronicleView === '性格'
+        ? <PersonalityView state={state} />
+        : chronicleView === '物品'
+          ? <InventoryView state={state} />
+          : <SettingsPanel settings={settings} onChange={setSettings} onClose={() => setChronicleView('事件')} onTest={testProvider} onExport={exportWorld} onReset={resetWorld} onSprite={importSprite} onLogs={() => setLogsOpen(true)} />;
+
+  if (isChronicleWindow) {
+    return (
+      <div className="chronicle-window" data-tauri-drag-region onMouseDown={handleWindowDrag}>
+        <div className="chronicle-shell">
+          <nav className="chronicle-nav">
+            {([['事件', History], ['人际', Heart], ['性格', Sparkles], ['物品', Package], ['设置', Cog]] as const).map(([label, Icon]) => <button className={chronicleView === label ? 'active' : ''} onClick={() => setChronicleView(label)} title={label} key={label}><Icon size={16} /><span>{label}</span></button>)}
+          </nav>
+          <main className="chronicle-content">{chronicleContent}</main>
+        </div>
+        {logsOpen && <LogsPanel close={() => setLogsOpen(false)} />}
+        {settingsOpen && <SettingsPanel settings={settings} onChange={setSettings} onClose={() => setSettingsOpen(false)} onTest={testProvider} onExport={exportWorld} onReset={resetWorld} onSprite={importSprite} onLogs={() => setLogsOpen(true)} />}
+        {toast && <div className="toast"><Sparkles size={14} />{toast}</div>}
+      </div>
+    );
+  }
+
+  return <div className="pet-only" data-tauri-drag-region onMouseDown={handleWindowDrag}><PetStage state={state} spriteUrl={spriteUrl} frame={spriteFrame} atlasSize={{ width: settings.spriteAtlasWidth, height: settings.spriteAtlasHeight }} spriteGrid={{ columns: settings.spriteColumns, rows: settings.spriteRows }} onClick={toggleChronicle} onResize={handleWindowResize} />{toast && <div className="toast"><Sparkles size={14} />{toast}</div>}</div>;
 }

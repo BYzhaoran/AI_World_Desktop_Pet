@@ -3,7 +3,6 @@
 ## Aoi
 - Stage: friend
 - Score: 42/100
-- Shared experiences: met at the library; shared a rainy afternoon; studied together.
 
 ## Yuki
 - Stage: acquaintance
@@ -12,3 +11,4 @@
 ## Ren
 - Stage: acquaintance
 - Score: 9/100
+
