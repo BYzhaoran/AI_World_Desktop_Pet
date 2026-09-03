@@ -1,126 +1,232 @@
-# Aoi's World 中文说明
+# The You Beyond
 
-这是一个长期运行的 AI 桌面角色世界。Aoi 会按照真实本地时间生活，逐渐积累事件、记忆、NPC 关系、共同经历、物品、技能、目标、XP、等级和人格证据。程序不是随机故事生成器，也不是聊天机器人。
+透明 AI 桌宠，拥有可自定义角色、精灵图动画、世界事件、连续记忆与动态成长。
 
-## 技术架构
+## 功能
 
-- Tauri v2：透明、无边框、置顶的 Windows / macOS 桌面窗口。
-- Rust：World Engine、事件验证、SQLite 持久化、调度器和 LLM Provider。
-- React + TypeScript + Vite：桌宠渲染、状态面板、Chronicle 和 Settings。
-- SQLite：结构化状态的唯一事实来源。
-- Markdown：用户可以直接编辑的人物长期记忆。
+- 透明、无边框、置顶桌宠窗口
+- 可独立显示或隐藏的事件栏
+- 桌宠窗口支持拖动和缩放
+- 可自定义人物名称、性格、经历、兴趣、技能和物品
+- 支持透明 PNG 精灵图
+- 可配置精灵图切分网格和动画帧率
+- 支持能量、心情、体力、智力、好奇心、社交、创造力和勇气
+- 五维属性雷达图和长期成长
+- 基于当前世界状态生成 AI 日常事件
+- 后端控制事件类型、地点、效果和事件连续性
+- 主事件与嵌套子进展
+- 事件去重、JSON 类型修复、冷却和规则校验
+- 人物、人际、地图、物品、技能、目标和记忆管理
+- 支持自定义 OpenAI-compatible API、模型和 API Key
+- SQLite 本地保存，Markdown 文件可读
+- 支持生成 Windows NSIS 和 MSI 安装包
 
-核心链路：
+## 核心架构
 
 ```text
-真实时间 -> Scheduler -> Event Candidate -> LLM Event Director
--> JSON Parse -> Schema / Rule / Cooldown Validation
--> World Engine -> SQLite + Markdown -> React Renderer
+真实时间
+   |
+世界调度器
+   |
+后端事件导演
+   |  决定事件类型、连续性、地点和持续时间
+AI 内容生成器
+   |  生成具体事件文本和效果
+后端校验
+   |  校验 JSON、参与者、效果、地点和重复内容
+世界引擎
+   |
+SQLite + Markdown + React 界面
 ```
 
-LLM 只能观察上下文并提出 `EventProposal`，不能直接访问数据库或覆盖人物文件。
+后端是修改世界状态的唯一 authority。AI 只能在后端给定的条件下生成内容。
 
-## 安装与开发
+## 环境要求
 
-需要 Node.js 18+、npm、Rust stable。macOS 需要 Xcode Command Line Tools，Windows 需要 WebView2 和 Visual Studio C++ Build Tools。
+- Windows 10/11 64 位
+- Node.js 18 或更高版本
+- npm
+- Rust stable 和 Cargo
+- WebView2
+- Visual Studio C++ Build Tools
 
-```sh
-npm install
-npm run dev
-npm run build
-npm run test
-npm run tauri dev
+## 开发运行
+
+在项目根目录执行：
+
+```powershell
+npm.cmd install
+npm.cmd run dev
 ```
 
-发布构建：
+运行 Tauri 桌面应用：
 
-```sh
-npm run tauri build
+```powershell
+npm.cmd run tauri dev
+```
+
+运行检查：
+
+```powershell
+npm.cmd run build
+npm.cmd test
 cargo test --manifest-path src-tauri/Cargo.toml
 ```
 
-构建产物位于 `src-tauri/target/release/bundle/`。
+## AI 配置
 
-## 中文优先的模型输出
+在 Settings 中配置：
 
-Settings 中可填写：
+- `Base URL`，例如 `https://example.com/v1`
+- `Model`
+- `API Key`
+- 输出语言
 
-- Base URL，例如 `https://example.com/v1`
-- Model，例如 `qwen3-max`
-- API Key
-- Output language：`中文优先` 或 `English`
-
-默认语言是中文。Rust Provider 会向模型发送明确约束：
-
-- 只返回 JSON
-- 默认使用简体中文
-- 普通事件的 `summary` 保持简短
-- 重要事件必须有长期意义
-- LLM 不得直接修改持久化状态
-
-如果选择 English，模型可以返回英文事件；如果没有选择 English，中文是优先语言。模型无论返回中文还是英文，都必须符合相同的结构化 EventProposal schema。
-
-请求接口：`POST /chat/completions`。
-
-错误包括 timeout、HTTP 非 2xx、invalid JSON、empty choices 和 schema mismatch。错误不会导致应用崩溃，程序会切换到离线事件。
-
-## API Key 安全
-
-API Key 不会写入 Git，也不会写入浏览器 localStorage，不会出现在日志中。桌面正式版应该将 Key 接入 macOS Keychain 或 Windows Credential Manager。当前浏览器预览只在当前页面内存中使用 Key。
-
-## 世界循环
-
-普通事件检查间隔为 20-90 分钟。重要事件每 4-8 小时进入概率候选窗口，不采用每 12 小时机械触发。概率会参考：
-
-- 当天已发生的重要事件数量
-- 最近重要事件时间
-- 目标压力
-- NPC 关系机会
-- 最近普通事件数量
-- 角色状态和随机因素
-
-离线模式允许普通日常继续运行，但不会产生重大的关系、人格或人物升级变化。
-
-## 人物 Markdown 文件
-
-可编辑文件：
+Provider 使用兼容 OpenAI 的接口：
 
 ```text
+POST /chat/completions
+```
+
+请求超时时间为 120 秒。应用会归一化常见的 Provider 响应格式，并在写入世界前校验事件结构。
+
+不要将 API Key 提交到 Git 仓库。发布软件或公开截图时，请隐藏 API Key。
+
+## 精灵图
+
+从 Settings 导入透明 PNG 精灵图。
+
+当前支持的网格配置包括：
+
+- 8 列 × 9 行
+- 10 列 × 9 行
+- 10 列 × 10 行
+- 12 列 × 10 行
+
+精灵图按照整数坐标切分：
+
+```text
+单帧宽度 = floor(图片宽度 / 列数)
+单帧高度 = floor(图片高度 / 行数)
+```
+
+每行可以对应一个动作。动画控制器支持待机、行走、快速动作、特殊动作、
+Ping-Pong 播放、可变帧时长、冷却和非无限循环动作。
+
+## 事件系统
+
+世界每 10 分钟执行一次 Tick。Tick 代表一次世界更新机会，并不意味着每次都要创建新的顶层事件。
+
+- 普通日常事件占绝大多数
+- 特殊事件和重大事件保持低概率
+- 学习、工作、阅读、散步、购物等持续活动使用一个主事件和多个子进展
+- 一个主事件最多包含 4 个子进展
+- 单个主事件的预计持续时间最多 40 分钟
+- 与最近事件高度相似的内容会被拒绝并重新生成
+- 只有真实发生 NPC 互动时，NPC 才会加入参与者
+- 所有效果由世界引擎校验并执行
+- 地点切换由停留时间和当前世界状态控制
+- 自动 Tick 使用唯一 Tick ID 防止重复生成
+- 手动“AI 立即生成”可用于测试
+
+事件结构：
+
+```text
+主事件
+  ├── 子进展 1
+  ├── 子进展 2
+  ├── 子进展 3
+  └── 子进展 4
+```
+
+## 世界数据
+
+主要配置文件位于：
+
+```text
+world/
+character/
+config/
+```
+
+重要文件包括：
+
+```text
+world/rules.md
+world/world.json
+world/locations.json
+world/event_probabilities.json
 character/character.md
 character/personality.md
 character/relationships.md
-character/important_people/*.md
-world/rules.md
+character/important_people/
+config/config.example.json
 ```
 
-应用启动和生成事件前会重新读取这些文件。普通事件不会更新人格；只有重要事件或人格相关事件才允许产生带事件 ID 的 Personality Evidence。人格变化会被限制在小幅 delta 内。
+`world/event_probabilities.json` 保存可编辑的事件概率策略，包括事件类别、
+连续事件时长分布和地点切换概率。
 
-## SQLite 数据
+结构化运行状态保存在 SQLite 中。安装版本的数据目录由应用数据目录配置决定。
 
-数据库默认位于 `data/world.sqlite3`，也可以通过 `AI_WORLD_DATA` 指定数据目录。当前迁移包含：
+## 构建 Windows 安装包
 
-- `world_state`
-- `events`
-- `personality_evidence`
-- `relationships`
-- `shared_experiences`
-- `inventory`
-- `skills`
-- `goals`
+执行：
 
-原始事件永久保留。Markdown 是人类可读记忆，SQLite 是结构化状态。
+```powershell
+npm.cmd run build
+npm.cmd run tauri build
+```
 
-## 导入、导出与桌面托盘
+生成文件位于：
 
-Settings 支持 JSON 世界快照导入导出、事件数量、动画 FPS、实时模式和重置世界。重置必须二次确认。Tauri 桌面端包含系统托盘，可显示窗口或退出程序。
+```text
+src-tauri/target/release/bundle/nsis/
+src-tauri/target/release/bundle/msi/
+```
 
-## Sprite Sheet
+推荐上传到 GitHub Release：
 
-精灵系统支持透明 PNG atlas。默认是 8 列 x 9 行，但不会写死尺寸。程序会根据实际图片宽高和配置计算 frame width / height，并校验是否整除。动画控制器支持 idle、walking、thinking、happy、sleepy、important_event、social、celebrating 等状态，以及 FPS、loop 和 ping-pong。
+```text
+The You Beyond_0.1.0_x64-setup.exe
+```
 
-## 故障排查
+NSIS `.exe` 安装包适合大多数用户。`.msi` 文件适合企业部署或受管控安装。
 
-- API 不可用：检查 Base URL 是否包含正确的 OpenAI-compatible 路径，程序会自动使用离线事件。
-- 桌面窗口打不开：先运行 `npm run build`，再检查 Rust、WebView2 或 Xcode Command Line Tools。
-- 数据丢失：确认 `AI_WORLD_DATA` 没有被切换到新的目录，并检查 `data/world.sqlite3`。
-- 中文输出异常：Settings 选择 `中文优先`，并确认模型支持中文和 JSON response format。
+## 常见问题
+
+### 找不到 Cargo
+
+安装 Rust 后重新打开终端：
+
+```powershell
+cargo --version
+rustc --version
+```
+
+### 打包时找不到图标
+
+确认图标文件存在：
+
+```text
+src-tauri/icons/icon.ico
+```
+
+然后重新执行：
+
+```powershell
+npm.cmd run tauri build
+```
+
+### AI 事件生成失败
+
+检查 Base URL、Model、API Key 和接口兼容性。接口必须支持：
+
+```text
+POST /chat/completions
+```
+
+可以在 Settings 中打开日志查看请求、响应、JSON 解析和事件校验错误。
+
+## License
+
+公开发布前请补充项目许可证。
