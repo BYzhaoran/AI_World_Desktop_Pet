@@ -94,7 +94,7 @@ async fn initialize_world_ai(app: tauri::AppHandle, engine: State<'_, Mutex<Engi
     if base_url.trim().is_empty() || model.trim().is_empty() || api_key.as_deref().unwrap_or_default().trim().is_empty() {
         return Err("Base URL, model and API key are required for AI initialization".into());
     }
-    let prompt = format!(
+    let mut prompt = format!(
         "Create the initial world seed for a desktop pet life simulation. Return exactly one valid JSON object with no Markdown. Schema: {{\"item\":{{\"name\":\"string\",\"description\":\"string\"}},\"locations\":[{{\"name\":\"string\",\"description\":\"string\",\"exploration\":0,\"rarity\":\"common\"}}],\"npc\":{{\"id\":\"zhaoran\",\"name\":\"zhaoran\",\"role\":\"string\",\"personality\":\"string\",\"favoriteItem\":\"string\",\"homeLocation\":\"string\",\"relationship\":0-100,\"relationshipNote\":\"string\",\"avatar\":\"\"}}}}. Generate exactly 4 basic locations based on the world setting, not 5. Generate exactly 1 starting item with a concrete useful description. Generate exactly 1 starting person: name and id must be zhaoran, but role/personality/favoriteItem/homeLocation/relationship/relationshipNote must be generated from the setting. role must be an identity or occupation such as 学生, 老师, 店员, 医生, 图书管理员, 插画师, 程序员, 研究员; never use 朋友/friend as role. If zhaoran's home is 家/Home, write homeLocation as zhaoran的家. Keep all Chinese text natural and concise. WORLD SETTING: {}. MAIN CHARACTER: name={}, tags={}, personality={}, experiences={}, interests={}, behavior={}. Sprite grid: {} columns x {} rows.",
         config.world_background,
         config.name,
@@ -151,6 +151,23 @@ fn set_rest_hours(app: tauri::AppHandle, engine: State<'_, Mutex<Engine>>, start
 }
 
 #[tauri::command]
+fn get_event_probabilities(engine: State<'_, Mutex<Engine>>) -> Result<String, String> {
+    Ok(engine.lock().map_err(|e| e.to_string())?.event_probability_policy())
+}
+
+#[tauri::command]
+fn set_event_probabilities(engine: State<'_, Mutex<Engine>>, content: String) -> Result<(), String> {
+    engine.lock().map_err(|e| e.to_string())?.set_event_probability_policy(&content).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn update_npc(app: tauri::AppHandle, engine: State<'_, Mutex<Engine>>, npc: NpcEffect) -> Result<WorldSnapshot, String> {
+    let snapshot = engine.lock().map_err(|e| e.to_string())?.update_npc(npc).map_err(|e| e.to_string())?;
+    let _ = app.emit("world-updated", &snapshot);
+    Ok(snapshot)
+}
+
+#[tauri::command]
 fn toggle_chronicle(app: tauri::AppHandle) -> Result<bool, String> {
     let chronicle = app.get_webview_window("chronicle").ok_or_else(|| "chronicle window not found".to_string())?;
     let visible = chronicle.is_visible().map_err(|e| e.to_string())?;
@@ -182,14 +199,23 @@ async fn test_provider(base_url: String, model: String, api_key: Option<String>)
 async fn generate_event(app: tauri::AppHandle, engine: State<'_, Mutex<Engine>>, base_url: String, model: String, api_key: Option<String>, language: Option<String>, character_context: Option<String>, rest_start: Option<i32>, rest_end: Option<i32>) -> Result<WorldSnapshot, String> {
     let start = rest_start.unwrap_or(22).clamp(0, 23);
     let end = rest_end.unwrap_or(8).clamp(0, 23);
-    let (snapshot, memory, location_due) = {
+    let tick_id = format!("tick-{}", Local::now().timestamp() / 600);
+    {
+        let guard = engine.lock().map_err(|e| e.to_string())?;
+        if !guard.claim_event_tick(&tick_id).map_err(|e| e.to_string())? {
+            eprintln!("[event] duplicate tick ignored tick_id={}", tick_id);
+            return guard.snapshot().map_err(|e| e.to_string());
+        }
+    }
+    let (snapshot, memory, location_due, probability_policy) = {
         let mut guard = engine.lock().map_err(|e| e.to_string())?;
         guard.set_rest_hours(start, end).map_err(|e| e.to_string())?;
         guard.scheduler_tick().map_err(|e| e.to_string())?;
         let snapshot = guard.snapshot().map_err(|e| e.to_string())?;
         let memory = guard.memory_context();
         let location_due = guard.location_change_due();
-        (snapshot, memory, location_due)
+        let probability_policy = guard.event_probability_policy();
+        (snapshot, memory, location_due, probability_policy)
     };
     let now = Local::now();
     let hour = now.hour() as i32;
@@ -255,19 +281,145 @@ async fn generate_event(app: tauri::AppHandle, engine: State<'_, Mutex<Engine>>,
         }),
         _ => serde_json::json!(null),
     };
-    let prompt = format!(
+    let character_context = character_context.unwrap_or_default();
+    let recent_summaries = snapshot.event_threads.iter()
+        .take(6)
+        .map(|thread| format!("{} {}", thread.title, thread.summary))
+        .chain(snapshot.events.iter().take(6).map(|event| event.summary.clone()))
+        .collect::<Vec<_>>();
+    let director_context = serde_json::json!({
+        "main_character": {
+            "name": snapshot.name,
+            "energy": snapshot.energy,
+            "mood": snapshot.mood,
+            "health": snapshot.health,
+            "intelligence": snapshot.intelligence,
+            "curiosity": snapshot.curiosity,
+            "social": snapshot.friendship,
+            "creativity": snapshot.creativity,
+            "courage": snapshot.courage,
+            "configured_profile": character_context,
+        },
+        "world": {
+            "time": snapshot.world_time,
+            "current_location": snapshot.location,
+            "weather": snapshot.weather,
+            "current_behavior": snapshot.current_behavior,
+            "known_locations": snapshot.known_locations,
+            "inventory": snapshot.inventory,
+            "skills": snapshot.skills,
+            "money": snapshot.money,
+        },
+        "relationships": snapshot.npcs,
+            "previous_event_for_threading_only": previous_event,
+            "active_threads": event_threads_for_prompt,
+            "recent_summaries_for_dedup_only": recent_summaries,
+        "location_change_available": location_due,
+    });
+    prompt = format!(
         "Generate one concrete causal world event, then compare it with PREVIOUS TOP-LEVEL EVENT before deciding its relation. Return exactly one valid JSON object, with no Markdown or explanation. Required fields: event_type, summary, importance 0..1, location, effects, participants, causes, memory, relation (exactly continue/new/related/interrupt/resume), thread_id (string or null), title (string or null), estimated_duration (integer or null), progress (object or null with summary, progress 0..1, state planned/active/paused/completed/interrupted/failed/abandoned). The summary must mainly begin with “你……”, speak directly to the player like a character casually chatting about what happened today. Use simple, concrete, everyday Simplified Chinese, like a short chat message. Do not write literary, poetic, atmospheric or novel-like prose; avoid piling up adjectives, metaphors and abstract descriptions. Prefer concrete actions, ordinary objects, short reactions and natural complaints. Ordinary small events should usually be 1-2 sentences; events with meaningful content may naturally use 3-5 sentences. Do not repeat facts to fill space. Add light teasing, sarcasm, self-deprecation or small jokes only when it fits the character and situation. If the current event is the continuation, advancement, next step, or intermediate state of the previous event, MUST return relation continue and the previous thread id; it must become a child Progress, never a new top-level event. This applies even when the wording changes, as long as the same task/activity/story is still underway. Use new only when it is a separate instantaneous event or a genuinely new activity. Use related for a separate activity connected to the previous one, interrupt when the previous activity is stopped by this event, and resume when the interrupted activity starts again. A continuous activity must use estimated_duration 10..40. Progress updates must be meaningful and at least 5 minutes apart. For a manual event action, do not return no_event. Do not modify state directly. STATE: {}. PREVIOUS TOP-LEVEL EVENT: {}. ACTIVE EVENT THREADS: {}. MEMORY: {}. CHARACTER: {}. Current local time: {}. A location change opportunity is {}. If the opportunity is false, keep the current location exactly. If true, decide whether to move based on time, behavior, energy, mood, weather and known locations; if moving, choose a different known location and describe the travel.",
         serde_json::to_string(&snapshot).map_err(|e| e.to_string())?,
         serde_json::to_string(&previous_event).map_err(|e| e.to_string())?,
         serde_json::to_string(&event_threads_for_prompt).map_err(|e| e.to_string())?,
-        memory,
-        character_context.unwrap_or_default(),
+        memory.chars().take(3500).collect::<String>(),
+        character_context,
         snapshot.world_time,
         if location_due { "available" } else { "not available" }
     );
-    let prompt = format!(
+    prompt = format!(
         "{}\nAdditional hard rules: plan each event thread to have 0 to 4 child progress updates based on its complexity. A simple event may have no progress updates. A complex activity may use 1, 2, 3 or at most 4 meaningful updates. Never create more than 4. The prompt includes the current update count: if there are already 3 updates, make the next update the final meaningful step and mark the thread completed; if there are 4, do not request another update and end the thread. If relation is continue/resume/interrupt and progress is not null, progress.summary must be the same complete conversational sentence quality as summary, not a shortened label. If the event introduces a new person/NPC, effects.npc is required and must be an object with camelCase fields: id, name, role, personality, favoriteItem, homeLocation, relationship, relationshipNote, avatar. role means occupation/job or social identity, such as 学生, 老师, 店员, 医生, 图书管理员, 插画师, 程序员, 研究员, 社团成员. Never use 朋友/friend as role; friendship belongs in relationshipNote and relationship score. personality means character traits. favoriteItem must be a concrete like/preference, not empty. relationship is the current 0..100 relationship score with the main character. relationshipNote explains how this person relates to the main character. If homeLocation is 家/Home, write it as NAME的家, for example zhaoran的家. Set avatar to an empty string; the app chooses a random transparent PNG avatar. If no new person is created, omit effects.npc or set it to null. For each five-dimensional attribute, sample a probability score from a normal distribution truncated to [0,1], centered at 0.5. A score near 0.5 means no change or a very small change; scores above 0.5 indicate a positive change and scores below 0.5 indicate a negative change. Use the exact local time, current behavior, energy, mood and event outcome to shift the distribution tendency: rest/success/enjoyable activities shift it upward, fatigue/failure/late-night strain shift it downward. The absolute delta must be derived from the distance from 0.5, rounded to one decimal, and remain within the normal-event limit of -1.0..1.0. Do not force every event to change an attribute.",
         prompt
+    );
+    prompt = format!(
+        "{}\nDIRECTOR CONTEXT, highest priority: {}.\nGrounding rules: The event must clearly use at least two concrete facts from DIRECTOR CONTEXT, choosing from current_location, known_locations, inventory, relationships, configured_profile, current_behavior, stats, world premise, or active thread. The chosen location must match current_location unless location_change_available is true. If relationships are non-empty, about 20 percent of events should involve one existing NPC by name and use that NPC's role/personality/favoriteItem/relationshipNote. If inventory is non-empty, ordinary events should sometimes use an owned item. Do not default to rain, windows, books, reading, libraries, quiet sitting, or generic 'feeling calm' unless those are explicitly required by the current location, active thread, or configured character profile AND they were not already used in recent_summaries. MEMORY, PREVIOUS EVENT, ACTIVE THREADS, and recent summaries are format/threading/dedup references only. Their old content, locations, weather, people, items, actions and themes are unrelated to the next event unless the same active thread is explicitly continued. Never copy or remix old examples as event content. Generate content from DIRECTOR CONTEXT first: current location, current character profile, current world background, current NPCs, current inventory, current stats, and current time. Prefer actions that fit the current location's description and the character's configured interests/behavior. If you cannot find enough context, use the current location and one relationship or item before inventing anything.",
+        prompt,
+        serde_json::to_string(&director_context).map_err(|e| e.to_string())?
+    );
+    let prompt = format!(
+        "{}\nWorld simulation policy: You are a continuously running world simulator, not a Q&A assistant. Known background, characters, locations, items, skills, memories and history are current known state and initial conditions, not the whole world and not the boundary of future development. Use them as references and constraints, while naturally advancing the world. You may create new low-impact details, rumors, minor conflicts, small discoveries, tasks, relationships, objects, places, organizations or secrets when they fit the world view, character personality and causal logic. Do not force expansion; most new content should be mundane and low-impact. Characters do not know the full truth and may guess, misunderstand, or be wrong. Events must have continuity and causality, but not every event needs plot. Think: if this world really exists, what is naturally happening now?\nEditable event probability policy loaded from world/event_probabilities.json: {}. Follow this probability file over any older probability text. Multi-event means one Event Thread with nested Progress, not multiple top-level events.",
+        prompt,
+        probability_policy
+    );
+    // The older prompt assembly above is retained for compatibility with existing
+    // logs, but only this compact director prompt is sent to the provider.
+    let compact_location = snapshot.known_locations.iter()
+        .find(|location| location.name == snapshot.location)
+        .or_else(|| snapshot.known_locations.first())
+        .map(|location| serde_json::json!({
+            "name": location.name,
+            "description": compact_text(&location.description, 240),
+            "exploration": location.exploration,
+            "rarity": location.rarity
+        }));
+    let compact_threads: Vec<_> = event_threads_for_prompt.iter().map(|thread| serde_json::json!({
+        "id": thread.id,
+        "title": compact_text(&thread.title, 90),
+        "status": thread.status,
+        "progress": thread.progress,
+        "estimated_duration": thread.estimated_duration,
+        "location": thread.location,
+        "updates": thread.updates.iter().rev().take(3).map(|update| serde_json::json!({
+            "time": update.timestamp,
+            "summary": compact_text(&update.summary, 140),
+            "progress": update.progress,
+            "state": update.state
+        })).collect::<Vec<_>>()
+    })).collect();
+    let compact_npcs: Vec<_> = snapshot.npcs.iter().take(12).map(|npc| serde_json::json!({
+        "id": npc.id,
+        "name": npc.name,
+        "role": npc.role,
+        "personality": compact_text(&npc.personality, 120),
+        "favorite_item": compact_text(&npc.favorite_item, 80),
+        "relationship": npc.relationship,
+        "note": compact_text(&npc.relationship_note, 120)
+    })).collect();
+    let compact_recent: Vec<String> = recent_summaries.iter()
+        .take(8)
+        .map(|summary| compact_text(summary, 120))
+        .collect();
+    let compact_context = serde_json::json!({
+        "time": snapshot.world_time,
+        "current_location": snapshot.location,
+        "location": compact_location,
+        "weather": compact_text(&snapshot.weather, 100),
+        "behavior": snapshot.current_behavior,
+        "main_character": {
+            "name": snapshot.name,
+            "energy": snapshot.energy,
+            "mood": snapshot.mood,
+            "health": snapshot.health,
+            "intelligence": snapshot.intelligence,
+            "curiosity": snapshot.curiosity,
+            "social": snapshot.friendship,
+            "creativity": snapshot.creativity,
+            "courage": snapshot.courage,
+            "profile": compact_text(&character_context, 3000)
+        },
+        "world_background": compact_text(&character_context, 1800),
+        "known_locations": snapshot.known_locations.iter().take(8).map(|location| serde_json::json!({
+            "name": location.name,
+            "description": compact_text(&location.description, 120),
+            "exploration": location.exploration
+        })).collect::<Vec<_>>(),
+        "inventory": snapshot.inventory.iter().take(12).map(|item| serde_json::json!({
+            "name": item.name,
+            "detail": compact_text(&item.detail, 100)
+        })).collect::<Vec<_>>(),
+        "relationships": compact_npcs,
+        "active_threads": compact_threads,
+        "recent_summaries_for_dedup_only": compact_recent
+    });
+    let directive = director_directive(&snapshot, location_due);
+    let prompt = format!(
+        "You are a content generator inside a backend-controlled life simulator. Return exactly one valid JSON object and no Markdown. The backend has already decided the structure; obey DIRECTOR DECISION and do not change its event type, relation, thread policy, duration policy, or location permission. Generate only the concrete, causal content.\n\
+Required JSON fields: event_type, summary, importance, location, effects, participants, causes, memory, relation, thread_id, title, estimated_duration, progress.\n\
+DIRECTOR DECISION: {}\n\
+WORLD STATE (compact and current): {}\n\
+RECENT SUMMARIES are only for deduplication; their content is not a template and must not be copied.\n\
+Rules: summary starts with “你” and sounds like casual daily chat, using simple concrete Chinese. Ordinary events are 1-2 sentences; do not write literary or atmospheric prose. A mere thought, memory or mention of an NPC is not interaction and must not add that NPC to participants. Add an NPC participant only for actual dialogue, contact or shared activity. Effects must match the described action; effects may be empty. Do not repeatedly use the same item, action, participant or effect as recent summaries. If DIRECTOR DECISION says continue, use its thread_id and put the complete new sentence in progress.summary; do not create a top-level event. Progress must be meaningful, no more than one update per Tick, and never exceed four updates. Use null rather than invented fields.",
+        directive,
+        serde_json::to_string(&compact_context).map_err(|e| e.to_string())?
     );
     let config = ProviderConfig {
         base_url,
@@ -276,7 +428,15 @@ async fn generate_event(app: tauri::AppHandle, engine: State<'_, Mutex<Engine>>,
         language: language.unwrap_or_else(|| "zh".into()),
     };
     eprintln!("[event] generating event with configured provider");
-    let raw = llm::generate(config, prompt).await?;
+    let raw = match llm::generate(config.clone(), prompt.clone()).await {
+        Ok(raw) => raw,
+        Err(error) => {
+            if let Ok(guard) = engine.lock() {
+                let _ = guard.release_event_tick(&tick_id);
+            }
+            return Err(error);
+        }
+    };
     let mut value = llm::parse_proposal(&raw)?;
     normalize_proposal_value(&mut value);
     eprintln!("[event] parsed proposal json={}", value);
@@ -285,7 +445,80 @@ async fn generate_event(app: tauri::AppHandle, engine: State<'_, Mutex<Engine>>,
         eprintln!("[event] {}", message);
         message
     })?;
-    if !location_due || proposal.location.trim().is_empty() {
+    let active_thread = event_threads_for_prompt.first();
+    let planned_type = planned_event_type(&snapshot, location_due);
+    proposal.event_type = planned_type.to_string();
+    if let Some(thread) = active_thread {
+        if thread.updates.len() >= 4 {
+            proposal.relation = Some("new".into());
+            proposal.thread_id = None;
+        } else {
+            proposal.relation = Some("continue".into());
+            proposal.thread_id = Some(thread.id.clone());
+            proposal.estimated_duration = Some(thread.estimated_duration.clamp(10, 40));
+        }
+    } else {
+        proposal.relation = Some("new".into());
+        proposal.thread_id = None;
+        if matches!(proposal.event_type.as_str(), "activity_event" | "social_event") {
+            proposal.estimated_duration = Some(proposal.estimated_duration.unwrap_or(20).clamp(10, 40));
+        } else {
+            proposal.estimated_duration = None;
+        }
+    }
+    if location_due {
+        if let Some(destination) = choose_destination(&snapshot) {
+            proposal.location = destination;
+        }
+    } else {
+        proposal.location = snapshot.location.clone();
+    }
+    if proposal.event_type == "social_event" || proposal.event_type == "relationship_event" {
+        if !has_real_npc_interaction(&proposal.summary, &proposal.participants, &snapshot) {
+            proposal.event_type = "activity_event".into();
+            proposal.participants.retain(|participant| participant == "main" || participant == &snapshot.name);
+            proposal.effects.relationship = None;
+        }
+    } else if !has_real_npc_interaction(&proposal.summary, &proposal.participants, &snapshot) {
+        proposal.participants.retain(|participant| participant == "main" || participant == &snapshot.name);
+    }
+    if proposal.relation.as_deref() == Some("continue") && proposal.thread_id.is_none() {
+        proposal.thread_id = active_thread.map(|thread| thread.id.clone());
+    }
+    if is_duplicate_summary(&proposal.summary, &recent_summaries) {
+        eprintln!("[event] duplicate summary detected; retrying with a fresh content directive");
+        let retry_prompt = format!(
+            "{}\nThe draft was too similar to a recent event. Produce a materially different ordinary action, object, setting detail or interaction while obeying the same DIRECTOR DECISION. Do not reuse the same sentence, item, action, NPC focus or effect pattern.",
+            prompt
+        );
+        let retry_raw = llm::generate(config, retry_prompt).await?;
+        let mut retry_value = llm::parse_proposal(&retry_raw)?;
+        normalize_proposal_value(&mut retry_value);
+        proposal = serde_json::from_value::<EventProposal>(retry_value).map_err(|error| {
+            let message = format!("LLM retry event schema mismatch: {}", error);
+            eprintln!("[event] {}", message);
+            message
+        })?;
+        proposal.event_type = planned_type.to_string();
+        proposal.relation = active_thread.map(|_| "continue".into()).or_else(|| Some("new".into()));
+        proposal.thread_id = active_thread.map(|thread| thread.id.clone());
+        proposal.location = if location_due {
+            choose_destination(&snapshot).unwrap_or_else(|| snapshot.location.clone())
+        } else {
+            snapshot.location.clone()
+        };
+        if let Some(thread) = active_thread {
+            proposal.estimated_duration = if thread.updates.len() >= 4 { None } else { Some(thread.estimated_duration.clamp(10, 40)) };
+        } else if matches!(proposal.event_type.as_str(), "activity_event" | "social_event") {
+            proposal.estimated_duration = Some(proposal.estimated_duration.unwrap_or(20).clamp(10, 40));
+        } else {
+            proposal.estimated_duration = None;
+        }
+        if is_duplicate_summary(&proposal.summary, &recent_summaries) {
+            return Err("provider generated a duplicate event twice; event rejected".into());
+        }
+    }
+    if proposal.location.trim().is_empty() {
         proposal.location = snapshot.location.clone();
     }
     if proposal.event_type == "no_event" {
@@ -298,6 +531,113 @@ async fn generate_event(app: tauri::AppHandle, engine: State<'_, Mutex<Engine>>,
     let _ = app.emit("world-updated", &updated);
     eprintln!("[event] applied successfully");
     Ok(updated)
+}
+
+fn compact_text(text: &str, max_chars: usize) -> String {
+    let text = text.trim();
+    text.chars().take(max_chars).collect()
+}
+
+fn director_directive(snapshot: &WorldSnapshot, location_due: bool) -> String {
+    let active = snapshot.event_threads.iter()
+        .find(|thread| matches!(thread.status.as_str(), "planned" | "active" | "paused"));
+    if let Some(thread) = active {
+        let updates = thread.updates.len();
+        if updates >= 4 {
+            return format!(
+                "type=activity_event; relation=new; current_thread={} is full with 4 updates, finish it and begin a distinct everyday activity; location={}; do_not_extend=true",
+                thread.id, snapshot.location
+            );
+        }
+        return format!(
+            "type=activity_event; relation=continue; thread_id={}; child_progress=true; update_count={}; max_updates=4; location={}; describe the next meaningful stage of the same activity",
+            thread.id, updates, snapshot.location
+        );
+    }
+    if location_due {
+        let alternatives: Vec<&str> = snapshot.known_locations.iter()
+            .map(|location| location.name.as_str())
+            .filter(|name| *name != snapshot.location && !name.is_empty())
+            .take(5)
+            .collect();
+        return format!(
+            "type=activity_event; relation=new; location_change=true; current_location={}; possible_destinations={:?}; choose a plausible destination and make the travel/arrival part of the event",
+            snapshot.location, alternatives
+        );
+    }
+    let event_type = planned_event_type(snapshot, false);
+    let duration = if matches!(event_type, "activity_event" | "social_event") { "20..40" } else { "null" };
+    format!(
+        "type={}; relation=new; thread_policy={}; location_change=false; location={}; participants_only_if_real_interaction=true",
+        event_type, duration, snapshot.location
+    )
+}
+
+fn choose_destination(snapshot: &WorldSnapshot) -> Option<String> {
+    let alternatives: Vec<String> = snapshot.known_locations.iter()
+        .map(|location| location.name.clone())
+        .filter(|name| !name.is_empty() && name != &snapshot.location)
+        .collect();
+    alternatives.get((Local::now().timestamp().unsigned_abs() as usize) % alternatives.len().max(1)).cloned()
+}
+
+fn planned_event_type(snapshot: &WorldSnapshot, location_due: bool) -> &'static str {
+    if location_due {
+        return "activity_event";
+    }
+    if snapshot.event_threads.iter().any(|thread| {
+        matches!(thread.status.as_str(), "planned" | "active" | "paused")
+    }) {
+        return "activity_event";
+    }
+    match snapshot.current_behavior.as_str() {
+        "social" => "social_event",
+        "explore" => "discovery_event",
+        "play" | "work" => "activity_event",
+        "observe" => "weather_event",
+        _ => {
+            let bucket = (chrono::Local::now().timestamp() / 600).unsigned_abs() % 20;
+            match bucket {
+                0 => "item_event",
+                1 => "weather_event",
+                2 => "discovery_event",
+                _ => "normal_event",
+            }
+        }
+    }
+}
+
+fn has_real_npc_interaction(summary: &str, participants: &[String], snapshot: &WorldSnapshot) -> bool {
+    let npc_names: Vec<&str> = snapshot.npcs.iter()
+        .map(|npc| npc.name.as_str())
+        .filter(|name| !name.trim().is_empty())
+        .collect();
+    let participant_is_npc = participants.iter().any(|participant| {
+        participant != "main" && participant != &snapshot.name && npc_names.iter().any(|name| participant == name)
+    });
+    participant_is_npc && ["聊天", "说", "问", "一起", "帮", "邀请", "见面", "收到", "联系", "争论", "送给", "碰到"]
+        .iter().any(|word| summary.contains(word))
+}
+
+fn is_duplicate_summary(candidate: &str, recent: &[String]) -> bool {
+    let normalize = |text: &str| -> Vec<char> {
+        text.chars().filter(|ch| !ch.is_whitespace() && !",，。.!！？?；;：:（）()\"'“”".contains(*ch)).collect()
+    };
+    let candidate = normalize(candidate);
+    if candidate.len() < 8 {
+        return false;
+    }
+    recent.iter().any(|old| {
+        let old = normalize(old);
+        if old.len() < 8 { return false; }
+        if old == candidate || old.windows(candidate.len()).any(|window| window == candidate.as_slice()) {
+            return true;
+        }
+        let candidate_set: std::collections::HashSet<char> = candidate.iter().copied().collect();
+        let old_set: std::collections::HashSet<char> = old.iter().copied().collect();
+        let overlap = candidate_set.intersection(&old_set).count() as f32;
+        overlap / candidate_set.len().max(old_set.len()) as f32 >= 0.82
+    })
 }
 
 fn normalize_proposal_value(value: &mut Value) {
@@ -406,7 +746,7 @@ pub fn run() {
             });
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![get_world, apply_proposal, reset_world, initialize_world, initialize_world_ai, scheduler_tick, set_rest_hours, toggle_chronicle, test_provider, generate_event])
+        .invoke_handler(tauri::generate_handler![get_world, apply_proposal, reset_world, initialize_world, initialize_world_ai, scheduler_tick, set_rest_hours, get_event_probabilities, set_event_probabilities, update_npc, toggle_chronicle, test_provider, generate_event])
         .run(tauri::generate_context!())
         .expect("error while running The You Beyond");
 }

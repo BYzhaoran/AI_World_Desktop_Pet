@@ -6,7 +6,7 @@ import { ChevronRight, Cog, Download, Heart, History, MapPin, Package, RefreshCw
 import { initialState } from './simulation';
 import { animationsForGrid, AnimationController, type AnimationState } from './sprite/AnimationController';
 import { frameFor } from './sprite/SpriteSheet';
-import type { EventEffects, EventRecord, EventThread, PetState, WorldSnapshot } from './types';
+import type { EventEffects, EventRecord, EventThread, Npc, PetState, WorldSnapshot } from './types';
 
 type SettingsState = {
   baseUrl: string;
@@ -19,6 +19,7 @@ type SettingsState = {
   realTime: boolean;
   onboardingComplete: boolean;
   worldBackground: string;
+  eventProbabilities: string;
   characterDescription: string;
   characterExperiences: string;
   characterTags: string;
@@ -48,7 +49,7 @@ type SettingsState = {
 };
 type LogEntry = { time: string; level: 'info' | 'error'; message: string };
 type ResizeDirection = 'East' | 'North' | 'NorthEast' | 'NorthWest' | 'South' | 'SouthEast' | 'SouthWest' | 'West';
-type SettingsTab = 'provider' | 'world' | 'character' | 'sprite' | 'task' | 'runtime' | 'reset';
+type SettingsTab = 'provider' | 'world' | 'probability' | 'character' | 'sprite' | 'task' | 'runtime' | 'reset';
 type SpriteUpdate = { data: string; atlasWidth: number; atlasHeight: number; frameWidth: number; frameHeight: number; columns: number; rows: number };
 
 function appendLog(level: LogEntry['level'], message: string) {
@@ -177,8 +178,28 @@ function Chronicle({ state, onAiGenerate }: { state: PetState; onAiGenerate: () 
   );
 }
 
-function RelationshipsView({ state }: { state: PetState }) {
+function RelationshipsView({ state, onState }: { state: PetState; onState: (state: WorldSnapshot) => void }) {
   const [openId, setOpenId] = useState<string | null>(state.npcs[0]?.id ?? null);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [draft, setDraft] = useState<Partial<Npc>>({});
+  const saveNpc = async (npc: Npc) => {
+    const updated = await invoke<WorldSnapshot>('update_npc', {
+      npc: {
+        id: npc.id,
+        name: draft.name ?? npc.name,
+        role: draft.role ?? npc.role,
+        personality: draft.personality ?? npc.personality,
+        favoriteItem: draft.favoriteItem ?? npc.favoriteItem,
+        homeLocation: draft.homeLocation ?? npc.homeLocation,
+        relationship: draft.relationship ?? npc.relationship,
+        relationshipNote: draft.relationshipNote ?? npc.relationshipNote,
+        avatar: npc.avatar,
+      },
+    });
+    onState(updated);
+    setEditingId(null);
+    setDraft({});
+  };
   return (
     <section className="detail-view">
       <div className="section-title"><div><span className="eyebrow">SOCIAL GRAPH</span><h3>人际</h3></div></div>
@@ -201,14 +222,26 @@ function RelationshipsView({ state }: { state: PetState }) {
               </button>
               {open && (
                 <div className="npc-detail">
-                  <p>{npc.relationshipNote || '还没有记录这段关系的细节。'}</p>
-                  <div className="npc-fields">
-                    <span><b>职业</b>{npc.role || '未知'}</span>
-                    <span><b>性格</b>{npc.personality || '还不太熟'}</span>
-                    <span><b>喜好</b>{npc.favoriteItem || '未知'}</span>
-                    <span><b>常驻</b>{npc.homeLocation || state.location}</span>
-                    <span><b>关系</b>{npc.stage || 'acquaintance'}</span>
-                  </div>
+                  {editingId === npc.id ? <>
+                    <label>名称<input value={draft.name ?? npc.name} onChange={event => setDraft(current => ({ ...current, name: event.target.value }))} /></label>
+                    <label>职业<input value={draft.role ?? npc.role} onChange={event => setDraft(current => ({ ...current, role: event.target.value }))} /></label>
+                    <label>性格<textarea value={draft.personality ?? npc.personality} onChange={event => setDraft(current => ({ ...current, personality: event.target.value }))} /></label>
+                    <label>喜好<input value={draft.favoriteItem ?? npc.favoriteItem} onChange={event => setDraft(current => ({ ...current, favoriteItem: event.target.value }))} /></label>
+                    <label>常驻<input value={draft.homeLocation ?? npc.homeLocation} onChange={event => setDraft(current => ({ ...current, homeLocation: event.target.value }))} /></label>
+                    <label>关系分<input type="number" min="0" max="100" value={draft.relationship ?? npc.relationship} onChange={event => setDraft(current => ({ ...current, relationship: Number(event.target.value) }))} /></label>
+                    <label>关系说明<textarea value={draft.relationshipNote ?? npc.relationshipNote} onChange={event => setDraft(current => ({ ...current, relationshipNote: event.target.value }))} /></label>
+                    <div className="settings-actions"><button className="outline-action" onClick={() => { setEditingId(null); setDraft({}); }}>CANCEL</button><button className="primary-action" onClick={() => void saveNpc(npc)}>SAVE</button></div>
+                  </> : <>
+                    <p>{npc.relationshipNote || '还没有记录这段关系的细节。'}</p>
+                    <div className="npc-fields">
+                      <span><b>职业</b>{npc.role || '未知'}</span>
+                      <span><b>性格</b>{npc.personality || '还不太熟'}</span>
+                      <span><b>喜好</b>{npc.favoriteItem || '未知'}</span>
+                      <span><b>常驻</b>{npc.homeLocation || state.location}</span>
+                      <span><b>关系</b>{npc.stage || 'acquaintance'}</span>
+                    </div>
+                    <button className="outline-action npc-edit" onClick={() => { setEditingId(npc.id); setDraft(npc); }}>EDIT</button>
+                  </>}
                 </div>
               )}
             </article>
@@ -295,7 +328,7 @@ function SettingsPanel({ settings, onChange, onClose, onSave, onTest, onExport, 
       <section className="settings-panel" onMouseDown={event => event.stopPropagation()}>
         <header><div><span className="eyebrow">WORLD CONFIGURATION</span><h2>Settings</h2></div><button className="icon-button" onClick={onClose}><X size={18} /></button></header>
         <nav className="settings-tabs">
-          {([['provider', 'API / Model'], ['world', 'World'], ['character', 'Character'], ['sprite', 'Sprite / Animation'], ['task', 'Task'], ['runtime', 'Runtime'], ['reset', 'Reset']] as const).map(([key, label]) => <button key={key} className={tab === key ? 'active' : ''} onClick={() => setTab(key)}>{label}</button>)}
+          {([['provider', 'API / Model'], ['world', 'World'], ['probability', 'Probability'], ['character', 'Character'], ['sprite', 'Sprite / Animation'], ['task', 'Task'], ['runtime', 'Runtime'], ['reset', 'Reset']] as const).map(([key, label]) => <button key={key} className={tab === key ? 'active' : ''} onClick={() => setTab(key)}>{label}</button>)}
         </nav>
         {tab === 'provider' && <>
           <label>Base URL<input value={settings.baseUrl} onChange={event => update({ baseUrl: event.target.value })} placeholder="https://example.com/v1" /></label>
@@ -306,6 +339,9 @@ function SettingsPanel({ settings, onChange, onClose, onSave, onTest, onExport, 
         </>}
         {tab === 'world' && <>
           <label>World background<textarea value={settings.worldBackground} onChange={event => update({ worldBackground: event.target.value })} placeholder="Describe the persistent world, rules, tone, locations and long-term premise." /></label>
+        </>}
+        {tab === 'probability' && <>
+          <label>Event probabilities JSON<textarea value={settings.eventProbabilities} onChange={event => update({ eventProbabilities: event.target.value })} placeholder="Edit world/event_probabilities.json" /></label>
         </>}
         {tab === 'character' && <>
           <label>Character name<input value={settings.characterName} onChange={event => update({ characterName: event.target.value })} placeholder="Character name" /></label>
@@ -426,7 +462,7 @@ function OnboardingPanel({ settings, onChange, onSprite, onDone, busy, progress 
 
 export default function App() {
   const [state, setState] = useState<PetState>(() => { try { return JSON.parse(localStorage.getItem('aoi-world-state') || 'null') || initialState; } catch { return initialState; } });
-  const [settings, setSettings] = useState<SettingsState>(() => { try { return { baseUrl: '', model: '', language: 'zh', characterName: initialState.name, sidebarEvents: 8, fps: 8, realTime: true, onboardingComplete: false, worldBackground: '', apiKey: '', characterDescription: '', characterExperiences: '', characterTags: '好奇, 温柔', characterInterests: '', characterBehavior: '', characterStartLocation: initialState.location, characterItems: '', characterSkills: '', characterAvatarFrame: 0, restStart: 22, restEnd: 8, characterHealth: 100, characterIntelligence: 50, characterFriendship: 0, characterCuriosity: 50, characterCreativity: 50, characterCourage: 50, spriteColumns: 8, spriteRows: 9, spriteData: '', spriteAtlasWidth: 768, spriteAtlasHeight: 936, spriteFrameWidth: 96, spriteFrameHeight: 104, ...JSON.parse(localStorage.getItem('aoi-world-settings') || '{}') }; } catch { return { baseUrl: '', model: '', apiKey: '', language: 'zh', characterName: initialState.name, sidebarEvents: 8, fps: 8, realTime: true, onboardingComplete: false, worldBackground: '', characterDescription: '', characterExperiences: '', characterTags: '好奇, 温柔', characterInterests: '', characterBehavior: '', characterStartLocation: initialState.location, characterItems: '', characterSkills: '', characterAvatarFrame: 0, restStart: 22, restEnd: 8, characterHealth: 100, characterIntelligence: 50, characterFriendship: 0, characterCuriosity: 50, characterCreativity: 50, characterCourage: 50, spriteColumns: 8, spriteRows: 9, spriteData: '', spriteAtlasWidth: 768, spriteAtlasHeight: 936, spriteFrameWidth: 96, spriteFrameHeight: 104 }; } });
+  const [settings, setSettings] = useState<SettingsState>(() => { try { return { baseUrl: '', model: '', language: 'zh', characterName: initialState.name, sidebarEvents: 8, fps: 8, realTime: true, onboardingComplete: false, worldBackground: '', eventProbabilities: '', apiKey: '', characterDescription: '', characterExperiences: '', characterTags: '好奇, 温柔', characterInterests: '', characterBehavior: '', characterStartLocation: initialState.location, characterItems: '', characterSkills: '', characterAvatarFrame: 0, restStart: 22, restEnd: 8, characterHealth: 100, characterIntelligence: 50, characterFriendship: 0, characterCuriosity: 50, characterCreativity: 50, characterCourage: 50, spriteColumns: 8, spriteRows: 9, spriteData: '', spriteAtlasWidth: 768, spriteAtlasHeight: 936, spriteFrameWidth: 96, spriteFrameHeight: 104, ...JSON.parse(localStorage.getItem('aoi-world-settings') || '{}') }; } catch { return { baseUrl: '', model: '', apiKey: '', language: 'zh', characterName: initialState.name, sidebarEvents: 8, fps: 8, realTime: true, onboardingComplete: false, worldBackground: '', eventProbabilities: '', characterDescription: '', characterExperiences: '', characterTags: '好奇, 温柔', characterInterests: '', characterBehavior: '', characterStartLocation: initialState.location, characterItems: '', characterSkills: '', characterAvatarFrame: 0, restStart: 22, restEnd: 8, characterHealth: 100, characterIntelligence: 50, characterFriendship: 0, characterCuriosity: 50, characterCreativity: 50, characterCourage: 50, spriteColumns: 8, spriteRows: 9, spriteData: '', spriteAtlasWidth: 768, spriteAtlasHeight: 936, spriteFrameWidth: 96, spriteFrameHeight: 104 }; } });
   const [running, setRunning] = useState(true);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [logsOpen, setLogsOpen] = useState(false);
@@ -463,8 +499,9 @@ export default function App() {
     void (async () => {
       try {
         const snapshot = await invoke<WorldSnapshot>('get_world');
+        const probabilities = await invoke<string>('get_event_probabilities');
         setState(current => ({ ...snapshot, name: settings.characterName.trim() || current.name || snapshot.name }));
-        setSettings(current => current.onboardingComplete ? ({ ...current, characterEnergy: snapshot.energy, characterMood: snapshot.mood, characterHealth: snapshot.health, characterIntelligence: snapshot.intelligence, characterFriendship: snapshot.friendship, characterCuriosity: snapshot.curiosity, characterCreativity: snapshot.creativity, characterCourage: snapshot.courage }) : current);
+        setSettings(current => current.onboardingComplete ? ({ ...current, eventProbabilities: probabilities, characterEnergy: snapshot.energy, characterMood: snapshot.mood, characterHealth: snapshot.health, characterIntelligence: snapshot.intelligence, characterFriendship: snapshot.friendship, characterCuriosity: snapshot.curiosity, characterCreativity: snapshot.creativity, characterCourage: snapshot.courage }) : ({ ...current, eventProbabilities: probabilities }));
         appendLog('info', 'backend connected');
         unlisten = await listen<WorldSnapshot>('world-updated', event => {
           appendLog('info', `world-updated events=${event.payload.events.length}`);
@@ -600,6 +637,9 @@ export default function App() {
   const saveSettings = async (afterSave?: () => void) => {
     try {
       applySpriteSettings();
+      if (settings.eventProbabilities.trim()) {
+        await invoke('set_event_probabilities', { content: settings.eventProbabilities });
+      }
       const snapshot = await invoke<WorldSnapshot>('set_rest_hours', { start: settings.restStart, end: settings.restEnd });
       setState(snapshot);
       notify('Settings saved');
@@ -665,7 +705,7 @@ export default function App() {
   const chronicleContent = chronicleView === '事件'
     ? <Chronicle state={state} onAiGenerate={generateAiEvent} />
     : chronicleView === '人际'
-      ? <RelationshipsView state={state} />
+      ? <RelationshipsView state={state} onState={setState} />
       : chronicleView === '人物'
         ? <CharacterView state={state} settings={settings} onChange={setSettings} spriteUrl={spriteUrl} atlasSize={{ width: settings.spriteAtlasWidth, height: settings.spriteAtlasHeight }} onFrameChange={setSpriteFrame} />
         : chronicleView === '地图'

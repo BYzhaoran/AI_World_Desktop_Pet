@@ -1,0 +1,85 @@
+{
+  "ordinary_daily_ratio_min": 0.9,
+  "single_event_probability": {
+    "ordinary_daily": 0.30,
+    "minor_special": 0.05,
+    "medium_special": 0.005,
+    "major": 0.0005
+  },
+  "multi_event_probability": {
+    "ordinary_daily": 0.60,
+    "minor_special": 0.04,
+    "medium_special": 0.004,
+    "major_continuous": 0.0005
+  },
+  "multi_event_duration_ticks": {
+    "ordinary_daily": {
+      "2_ticks_20_minutes": 0.55,
+      "3_ticks_30_minutes": 0.30,
+      "4_ticks_40_minutes": 0.15
+    },
+    "minor_special": {
+      "2_ticks_20_minutes": 0.45,
+      "3_ticks_30_minutes": 0.35,
+      "4_ticks_40_minutes": 0.20
+    }
+  },
+  "location_change_probability": [
+    { "minutes_min": 0, "minutes_max": 30, "probability_min": 0.0, "probability_max": 0.01 },
+    { "minutes_min": 30, "minutes_max": 60, "probability_min": 0.01, "probability_max": 0.03 },
+    { "minutes_min": 60, "minutes_max": 120, "probability_min": 0.03, "probability_max": 0.06 },
+    { "minutes_min": 120, "minutes_max": 180, "probability_min": 0.06, "probability_max": 0.12 },
+    { "minutes_min": 180, "minutes_max": 210, "probability_min": 0.12, "probability_max": 0.25 },
+    { "minutes_min": 210, "minutes_max": 230, "probability_min": 0.25, "probability_max": 0.50 },
+    { "minutes_min": 230, "minutes_max": 240, "probability_min": 0.50, "probability_max": 1.0 }
+  ],
+  "event_classes": {
+    "ordinary_daily": [
+      "resting",
+      "spacing_out",
+      "eating",
+      "drinking",
+      "studying",
+      "working",
+      "entertainment",
+      "walking",
+      "chatting",
+      "observing_environment",
+      "weather_change",
+      "simple_emotion_change"
+    ],
+    "minor_special": [
+      "accidental_encounter",
+      "unexpected_message",
+      "small_found_object",
+      "minor_interruption",
+      "stranger_encounter",
+      "new_small_interest"
+    ],
+    "medium_special": [
+      "new_character_with_future_impact",
+      "special_location",
+      "important_item",
+      "clear_conflict",
+      "hidden_clue"
+    ],
+    "major": [
+      "important_person_appears",
+      "major_crisis",
+      "key_secret_revealed",
+      "major_faction_intervenes",
+      "life_changing_shift"
+    ]
+  },
+  "rules": [
+    "More than 90% of generated events should be ordinary daily life.",
+    "Special events must remain low probability.",
+    "Multi-event means one Event Thread with nested Progress, not multiple top-level events.",
+    "A thread can have at most 4 child progress updates and at most 40 minutes.",
+    "When a thread reaches 4 updates, complete it, transition to a related new thread, or stop.",
+    "Medium and major events should not be extended just to increase duration.",
+    "Major events should be extremely rare and usually require prior buildup.",
+    "Location change is checked every 10 minutes independently from ordinary event rarity.",
+    "Outside rest time, staying in one location for 4 hours must trigger a location change."
+  ]
+}

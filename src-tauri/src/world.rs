@@ -9,6 +9,41 @@ const EVENT_TYPES: &[&str] = &[
     "important_event", "milestone_event", "level_up",
 ];
 
+const DEFAULT_EVENT_PROBABILITIES: &str = r#"{
+  "ordinary_daily_ratio_min": 0.9,
+  "single_event_probability": {
+    "ordinary_daily": 0.30,
+    "minor_special": 0.05,
+    "medium_special": 0.005,
+    "major": 0.0005
+  },
+  "multi_event_probability": {
+    "ordinary_daily": 0.60,
+    "minor_special": 0.04,
+    "medium_special": 0.004,
+    "major_continuous": 0.0005
+  },
+  "multi_event_duration_ticks": {
+    "ordinary_daily": {
+      "2_ticks_20_minutes": 0.55,
+      "3_ticks_30_minutes": 0.30,
+      "4_ticks_40_minutes": 0.15
+    },
+    "minor_special": {
+      "2_ticks_20_minutes": 0.45,
+      "3_ticks_30_minutes": 0.35,
+      "4_ticks_40_minutes": 0.20
+    }
+  },
+  "rules": [
+    "More than 90% of generated events should be ordinary daily life.",
+    "Special events must remain low probability.",
+    "Multi-event means one Event Thread with nested Progress, not multiple top-level events.",
+    "A thread can have at most 4 child progress updates and at most 40 minutes.",
+    "Major events should be extremely rare and usually require prior buildup."
+  ]
+}"#;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RelationshipEffect {
@@ -359,6 +394,65 @@ impl Engine {
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
     }
 
+    pub fn event_probability_policy(&self) -> String {
+        let path = self.project_root().join("world").join("event_probabilities.json");
+        fs::read_to_string(path).unwrap_or_else(|_| DEFAULT_EVENT_PROBABILITIES.to_string())
+    }
+
+    pub fn set_event_probability_policy(&self, content: &str) -> rusqlite::Result<()> {
+        serde_json::from_str::<serde_json::Value>(content)
+            .map_err(|error| rusqlite::Error::InvalidParameterName(format!("invalid event probability JSON: {}", error)))?;
+        let dir = self.project_root().join("world");
+        fs::create_dir_all(&dir).map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+        fs::write(dir.join("event_probabilities.json"), content)
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
+    }
+
+    pub fn claim_event_tick(&self, tick_id: &str) -> rusqlite::Result<bool> {
+        if self.value("last_event_tick")?.as_deref() == Some(tick_id) {
+            return Ok(false);
+        }
+        self.db.execute(
+            "INSERT OR REPLACE INTO world_state(key,value) VALUES ('last_event_tick',?1)",
+            params![tick_id],
+        )?;
+        Ok(true)
+    }
+
+    pub fn release_event_tick(&self, tick_id: &str) -> rusqlite::Result<()> {
+        self.db.execute(
+            "DELETE FROM world_state WHERE key='last_event_tick' AND value=?1",
+            params![tick_id],
+        )?;
+        Ok(())
+    }
+
+    fn location_change_probability(&self, elapsed_minutes: i32) -> f32 {
+        let policy = serde_json::from_str::<serde_json::Value>(&self.event_probability_policy()).ok();
+        if let Some(items) = policy.as_ref().and_then(|value| value.get("location_change_probability")).and_then(|value| value.as_array()) {
+            for item in items {
+                let min = item.get("minutes_min").and_then(|value| value.as_i64()).unwrap_or(0) as i32;
+                let max = item.get("minutes_max").and_then(|value| value.as_i64()).unwrap_or(min as i64) as i32;
+                if elapsed_minutes >= min && elapsed_minutes < max {
+                    let p_min = item.get("probability_min").and_then(|value| value.as_f64()).unwrap_or(0.0) as f32;
+                    let p_max = item.get("probability_max").and_then(|value| value.as_f64()).unwrap_or(p_min as f64) as f32;
+                    let span = (max - min).max(1) as f32;
+                    let t = (elapsed_minutes - min).max(0) as f32 / span;
+                    return (p_min + (p_max - p_min) * t).clamp(0.0, 1.0);
+                }
+            }
+        }
+        match elapsed_minutes {
+            ..=29 => 0.01,
+            30..=59 => 0.03,
+            60..=119 => 0.06,
+            120..=179 => 0.12,
+            180..=209 => 0.25,
+            210..=229 => 0.50,
+            _ => 1.0,
+        }
+    }
+
     fn random_npc_avatar(&self, seed: u64) -> Option<String> {
         let dir = self.project_root().join("icons_split");
         let mut files = fs::read_dir(dir).ok()?
@@ -390,10 +484,19 @@ impl Engine {
         if self.in_rest_period(now) {
             return false;
         }
-        let now = now.timestamp();
+        let current = now.timestamp();
         let last = self.value("last_location_change").ok().flatten()
-            .and_then(|value| value.parse::<i64>().ok()).unwrap_or(now);
-        now - last >= 4 * 3600
+            .and_then(|value| value.parse::<i64>().ok()).unwrap_or(current);
+        let elapsed = current - last;
+        if elapsed >= 4 * 3600 {
+            return true;
+        }
+        if elapsed < 0 {
+            return false;
+        }
+        let bucket = current / (10 * 60);
+        let seed = (bucket as u64) ^ (last as u64).rotate_left(17);
+        unit(seed) < self.location_change_probability((elapsed / 60) as i32)
     }
 
     fn enforce_location_schedule(&mut self, now: DateTime<Local>) -> rusqlite::Result<bool> {
@@ -775,6 +878,28 @@ impl Engine {
         tx.execute("INSERT INTO relationships(npc_id,score,stage) VALUES ('zhaoran',?1,?2)", params![relationship, stage])?;
         tx.commit()?;
         self.sync_markdown("initial-ai-assets")?;
+        self.snapshot()
+    }
+
+    pub fn update_npc(&mut self, mut npc: NpcEffect) -> rusqlite::Result<WorldSnapshot> {
+        if npc.id.trim().is_empty() {
+            return Err(rusqlite::Error::InvalidParameterName("npc id is required".into()));
+        }
+        let seed = Local::now().timestamp_millis().unsigned_abs();
+        npc.role = npc_role(&npc.role, seed);
+        npc.home_location = npc_home_location(&npc.name, &npc.home_location);
+        if npc.avatar.trim().is_empty() {
+            npc.avatar = self.random_npc_avatar(seed).unwrap_or_else(|| npc.name.chars().next().unwrap_or('N').to_string());
+        }
+        let relationship = npc.relationship.round().clamp(0.0, 100.0) as i32;
+        let stage = relationship_stage(relationship);
+        let tx = self.db.transaction()?;
+        tx.execute("INSERT INTO npcs(id,name,role,avatar,personality,favorite_item,home_location,relationship_note) VALUES (?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(id) DO UPDATE SET name=excluded.name,role=excluded.role,avatar=excluded.avatar,personality=excluded.personality,favorite_item=excluded.favorite_item,home_location=excluded.home_location,relationship_note=excluded.relationship_note",
+            params![npc.id, npc.name, npc.role, npc.avatar, npc.personality, npc.favorite_item, npc.home_location, npc.relationship_note])?;
+        tx.execute("INSERT INTO relationships(npc_id,score,stage) VALUES (?1,?2,?3) ON CONFLICT(npc_id) DO UPDATE SET score=excluded.score,stage=excluded.stage",
+            params![npc.id, relationship, stage])?;
+        tx.commit()?;
+        self.sync_markdown("npc-edited")?;
         self.snapshot()
     }
 
