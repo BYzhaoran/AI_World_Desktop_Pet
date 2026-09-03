@@ -98,17 +98,20 @@ async fn test_provider(base_url: String, model: String, api_key: Option<String>)
 
 #[tauri::command]
 async fn generate_event(app: tauri::AppHandle, engine: State<'_, Mutex<Engine>>, base_url: String, model: String, api_key: Option<String>, language: Option<String>, character_context: Option<String>) -> Result<WorldSnapshot, String> {
-    let (snapshot, memory) = {
+    let (snapshot, memory, location_due) = {
         let guard = engine.lock().map_err(|e| e.to_string())?;
         let snapshot = guard.snapshot().map_err(|e| e.to_string())?;
         let memory = guard.memory_context();
-        (snapshot, memory)
+        let location_due = guard.location_change_due();
+        (snapshot, memory, location_due)
     };
     let prompt = format!(
-        "Generate one concrete causal world event from the state, memory, and character context below. Return exactly one valid JSON object, with no Markdown or explanation. Required fields: event_type (one of normal_event, social_event, activity_event, weather_event, discovery_event, item_event, skill_event, relationship_event, important_event, milestone_event, level_up), summary (concise Simplified Chinese sentence), importance (number 0..1), location (string), effects (object with optional numeric energy, mood, xp), participants (string array), causes (string array), memory (boolean). For a manual event action, do not return no_event. Do not use a fixed example and do not modify state directly.\nSTATE: {}\nMEMORY: {}\nCHARACTER: {}",
+        "Generate one concrete causal world event from the state, memory, and character context below. Return exactly one valid JSON object, with no Markdown or explanation. Required fields: event_type (one of normal_event, social_event, activity_event, weather_event, discovery_event, item_event, skill_event, relationship_event, important_event, milestone_event, level_up), summary (concise Simplified Chinese sentence), importance (number 0..1), location (string), effects (object with optional numeric energy, mood, health, xp, intelligence, curiosity, friendship, creativity, courage), participants (string array), causes (string array), memory (boolean). For a manual event action, do not return no_event. Do not use a fixed example and do not modify state directly. STATE: {}. MEMORY: {}. CHARACTER: {}. Current local time: {}. A location change opportunity is {}. If the opportunity is false, keep the current location exactly. If true, decide whether to move based on the time, current behavior, energy, mood, weather and known locations; if moving, choose a different known location and make the summary describe the travel.",
         serde_json::to_string(&snapshot).map_err(|e| e.to_string())?,
         memory,
-        character_context.unwrap_or_default()
+        character_context.unwrap_or_default(),
+        snapshot.world_time,
+        if location_due { "available" } else { "not available" }
     );
     let config = ProviderConfig {
         base_url,
@@ -120,11 +123,14 @@ async fn generate_event(app: tauri::AppHandle, engine: State<'_, Mutex<Engine>>,
     let raw = llm::generate(config, prompt).await?;
     let value = llm::parse_proposal(&raw)?;
     eprintln!("[event] parsed proposal json={}", value);
-    let proposal = serde_json::from_value::<EventProposal>(value).map_err(|error| {
+    let mut proposal = serde_json::from_value::<EventProposal>(value).map_err(|error| {
         let message = format!("LLM event schema mismatch: {}", error);
         eprintln!("[event] {}", message);
         message
     })?;
+    if !location_due {
+        proposal.location = snapshot.location.clone();
+    }
     if proposal.event_type == "no_event" {
         let message = "LLM returned no_event for a manual event request".to_string();
         eprintln!("[event] {}", message);

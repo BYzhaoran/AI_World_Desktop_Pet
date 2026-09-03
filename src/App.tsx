@@ -59,13 +59,18 @@ function Progress({ value, color = '#d66b62' }: { value: number; color?: string 
   return <div className="progress"><span style={{ width: `${Math.min(100, value)}%`, background: color }} /></div>;
 }
 
+function formatEventTime(timestamp: string) {
+  const match = timestamp.match(/^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})/);
+  return match ? `${match[1]} ${match[2]}` : timestamp;
+}
+
 function EventItem({ event }: { event: EventRecord }) {
   const important = event.type === 'important_event';
   return (
     <article className={`event ${important ? 'important' : ''}`}>
       <div className="event-time">
         {important && <Sparkles size={13} />}
-        {event.timestamp}
+        {formatEventTime(event.timestamp)}
         <span>{event.location}</span>
       </div>
       <p>{event.summary}</p>
@@ -141,6 +146,19 @@ function InventoryView({ state }: { state: PetState }) {
   return <section className="detail-view"><div className="section-title"><div><span className="eyebrow">COLLECTED OBJECTS</span><h3>物品</h3></div></div><div className="detail-list">{state.inventory.map(item => <article className="detail-row" key={item.name}><div className="item-icon"><Package size={16} /></div><div><strong>{item.name}</strong><span>{item.detail}</span></div></article>)}</div></section>;
 }
 
+function RadarChart({ values }: { values: number[] }) {
+  const center = 130;
+  const radius = 88;
+  const point = (index: number, value: number) => {
+    const angle = -Math.PI / 2 + index * (Math.PI * 2 / 5);
+    const distance = radius * Math.max(0, Math.min(100, value)) / 100;
+    return `${center + Math.cos(angle) * distance},${center + Math.sin(angle) * distance}`;
+  };
+  const ring = (value: number) => Array.from({ length: 5 }, (_, index) => point(index, value)).join(' ');
+  const labels = ['智力', '好奇心', '社交', '创造力', '勇气'];
+  return <div className="radar-wrap"><svg className="radar-chart" viewBox="0 0 260 260" role="img" aria-label="五维属性雷达图"><polygon points={ring(100)} /><polygon points={ring(50)} /><polygon points={ring(25)} />{labels.map((label, index) => { const [x, y] = point(index, 100).split(','); return <line key={label} x1={center} y1={center} x2={x} y2={y} />; })}<polygon className="radar-value" points={values.map((value, index) => point(index, value)).join(' ')} />{labels.map((label, index) => { const [x, y] = point(index, 119).split(','); return <text key={label} x={x} y={y} textAnchor="middle" dominantBaseline="middle">{label}</text>; })}</svg><div className="radar-values">{labels.map((label, index) => <span key={label}>{label} <b>{Number(values[index] ?? 0).toFixed(1)}</b></span>)}</div></div>;
+}
+
 function CharacterView({ state, settings, onChange, spriteUrl, atlasSize, onFrameChange }: { state: PetState; settings: SettingsState; onChange: (next: SettingsState) => void; spriteUrl: string; atlasSize: { width: number; height: number }; onFrameChange: (frame: number) => void }) {
   const [editing, setEditing] = useState(false);
   const update = (patch: Partial<SettingsState>) => onChange({ ...settings, ...patch });
@@ -163,7 +181,8 @@ function CharacterView({ state, settings, onChange, spriteUrl, atlasSize, onFram
       <label>初始技能<input value={settings.characterSkills} onChange={event => update({ characterSkills: event.target.value })} placeholder="阅读, 绘画" /></label>
       <label>头像帧<input type="number" min="0" max={settings.spriteColumns * settings.spriteRows - 1} value={settings.characterAvatarFrame} onChange={event => { const frame = Math.max(0, Number(event.target.value)); update({ characterAvatarFrame: frame }); onFrameChange(frame); }} /></label>
     </div>}
-    <div className="profile-dimensions"><strong>五维成长属性</strong><div className="profile-grid">{[['智力', settings.characterIntelligence ?? state.intelligence], ['好奇心', settings.characterCuriosity ?? state.curiosity], ['社交', settings.characterFriendship ?? state.friendship], ['创造力', settings.characterCreativity ?? state.creativity], ['勇气', settings.characterCourage ?? state.courage]].map(([label, value]) => <div className="profile-stat" key={String(label)}><span>{label}</span><b>{value}</b><Progress value={Number(value)} /></div>)}</div></div>
+    <div className="xp-panel"><div><strong>XP 经验</strong><b>{state.xp} / {state.nextXp}</b></div><Progress value={state.nextXp > 0 ? state.xp / state.nextXp * 100 : 0} color="#c18a34" /></div><div className="profile-dimensions"><strong>五维成长属性</strong><div className="profile-grid">{[['智力', state.intelligence], ['好奇心', state.curiosity], ['社交', state.friendship], ['创造力', state.creativity], ['勇气', state.courage]].map(([label, value]) => <div className="profile-stat" key={String(label)}><span>{label}</span><b>{value}</b><Progress value={Number(value)} /></div>)}</div></div>
+    <RadarChart values={[state.intelligence, state.curiosity, state.friendship, state.creativity, state.courage]} />
   </section>;
 }
 
@@ -173,7 +192,7 @@ function MapView({ state }: { state: PetState }) {
   return <section className="detail-view map-view">
     <div className="section-title"><div><span className="eyebrow">WORLD LOCATIONS</span><h3>地图</h3></div><span className="map-current"><MapPin size={13} /> 当前：{state.location}</span></div>
     <div className="location-list">{locations.map(location => <article className={`location-row ${location.name === state.location ? 'current' : ''}`} key={location.name}><div className="location-icon"><MapPin size={16} /></div><div><strong>{location.name}</strong><span>{location.description || '尚无场景描述'}</span><small>探索度 {location.exploration}% · {location.rarity}</small></div>{location.name === state.location && <b>当前所在</b>}{eventLocations.has(location.name) && <em>事件发生地</em>}</article>)}</div>
-    <div className="map-event-note"><strong>最近事件场景</strong>{state.events.slice(0, 5).map(event => <p key={event.id}><span>{event.timestamp}</span>{event.location || '未知地点'}：{event.summary}</p>)}</div>
+    <div className="map-event-note"><strong>最近事件场景</strong>{state.events.slice(0, 5).map(event => <p key={event.id}><span>{formatEventTime(event.timestamp)}</span>{event.location || '未知地点'}：{event.summary}</p>)}</div>
   </section>;
 }
 
@@ -275,10 +294,12 @@ export default function App() {
       try {
         const snapshot = await invoke<WorldSnapshot>('get_world');
         setState(current => ({ ...snapshot, name: settings.characterName.trim() || current.name || snapshot.name }));
+        setSettings(current => ({ ...current, characterEnergy: snapshot.energy, characterMood: snapshot.mood, characterHealth: snapshot.health, characterIntelligence: snapshot.intelligence, characterFriendship: snapshot.friendship, characterCuriosity: snapshot.curiosity, characterCreativity: snapshot.creativity, characterCourage: snapshot.courage }));
         appendLog('info', 'backend connected');
         unlisten = await listen<WorldSnapshot>('world-updated', event => {
           appendLog('info', `world-updated events=${event.payload.events.length}`);
           setState(event.payload);
+          setSettings(current => ({ ...current, characterEnergy: event.payload.energy, characterMood: event.payload.mood, characterHealth: event.payload.health, characterIntelligence: event.payload.intelligence, characterFriendship: event.payload.friendship, characterCuriosity: event.payload.curiosity, characterCreativity: event.payload.creativity, characterCourage: event.payload.courage }));
         });
       } catch (error) {
         appendLog('error', `backend unavailable: ${String(error)}`);
@@ -324,13 +345,15 @@ export default function App() {
     generatingRef.current = true;
     appendLog('info', 'starting AI event generation');
     try {
-      setState(await invoke<WorldSnapshot>('generate_event', {
+      const updated = await invoke<WorldSnapshot>('generate_event', {
         baseUrl: settings.baseUrl,
         model: settings.model,
         apiKey: settings.apiKey || null,
         language: settings.language,
         characterContext: `Name: ${settings.characterName}\nTags: ${settings.characterTags}\nInterests: ${settings.characterInterests}\nBehavior: ${settings.characterBehavior}\nStart location: ${settings.characterStartLocation}\nStats: energy=${settings.characterEnergy ?? state.energy}, mood=${settings.characterMood ?? state.mood}, health=${settings.characterHealth ?? state.health}, intelligence=${settings.characterIntelligence ?? state.intelligence}, curiosity=${settings.characterCuriosity ?? state.curiosity}, social=${settings.characterFriendship ?? state.friendship}, creativity=${settings.characterCreativity ?? state.creativity}, courage=${settings.characterCourage ?? state.courage}\nInitial items: ${settings.characterItems}\nInitial skills: ${settings.characterSkills}\nPersonality: ${settings.characterDescription}\nExperiences: ${settings.characterExperiences}`,
-      }));
+      });
+      setState(updated);
+      setSettings(current => ({ ...current, characterEnergy: updated.energy, characterMood: updated.mood, characterHealth: updated.health, characterIntelligence: updated.intelligence, characterFriendship: updated.friendship, characterCuriosity: updated.curiosity, characterCreativity: updated.creativity, characterCourage: updated.courage }));
       notify('AI event generated');
     } catch (error) {
       const message = `AI event failed: ${String(error)}`;
